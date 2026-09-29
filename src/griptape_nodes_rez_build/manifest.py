@@ -26,6 +26,8 @@ DEFAULT_LIBRARY_VERSION = "1.0.0"
 # GTN_LIBRARY_WORKER_REQUESTS entries are `<name>=<request>` joined by the platform's path
 # separator, so a library name must not contain either separator or `=`.
 _FORBIDDEN_NAME_CHARACTERS = (":", ";", "=")
+# rez expands {name} and $NAME in commands() values, and these become part of package paths.
+_FORBIDDEN_FOLDER_CHARACTERS = ("{", "}", "$")
 _REZ_VERSION = re.compile(r"^[A-Za-z0-9_]+([.\-][A-Za-z0-9_]+)*$")
 _SKIPPED_FOLDERS = {".git", ".venv", ".venv-exec", "node_modules", "__pycache__", "build", "dist"}
 _VERSION_SEARCH_DEPTH = 4
@@ -52,10 +54,17 @@ class LibraryManifest:
 
 @dataclass(frozen=True)
 class LibraryFamily:
-    """A library's rez family (``<family>``; the edit package is ``<family>_edit``) and where the name came from."""
+    """A library's rez family (``<family>``; the edit package is ``<family>_edit``) and where the name came from.
+
+    ``folder`` is the repository or folder name itself (``griptape-nodes-library-standard``). The
+    edit package keeps the library under ``python/<folder>/``, because the engine matches a
+    ``library_dependency`` URL to an installed library by that name appearing as a folder in the
+    manifest's path.
+    """
 
     family: str
     source: str
+    folder: str
 
     @property
     def edit_family(self) -> str:
@@ -137,11 +146,22 @@ def library_family(manifest_path: Path) -> LibraryFamily:
     if git.repository_root(library_dir) is not None:
         remote = git.remote_repository_name(library_dir)
         if remote:
-            return LibraryFamily(family=family_name(remote), source=f"git remote repository '{remote}'")
+            return _family_for(remote, f"git remote repository '{remote}'")
         root = git.repository_root(library_dir)
         if root is not None:
-            return LibraryFamily(family=family_name(root.name), source=f"git repository folder '{root.name}'")
-    return LibraryFamily(family=family_name(library_dir.name), source=f"folder '{library_dir.name}'")
+            return _family_for(root.name, f"git repository folder '{root.name}'")
+    return _family_for(library_dir.name, f"folder '{library_dir.name}'")
+
+
+def _family_for(name: str, source: str) -> LibraryFamily:
+    bad = [character for character in _FORBIDDEN_FOLDER_CHARACTERS if character in name]
+    if bad:
+        msg = (
+            f"Attempted to package the library from '{name}'. Failed because the name contains {' '.join(bad)}, "
+            "which rez would expand in the package's paths. Rename the folder or repository."
+        )
+        raise BuildError(msg)
+    return LibraryFamily(family=family_name(name), source=source, folder=name)
 
 
 def family_from_url(url: str) -> str:

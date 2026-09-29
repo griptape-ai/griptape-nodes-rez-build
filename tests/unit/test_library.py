@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 AWKWARD_NAME = 'Rez\'s "Test" Library \\'
-FAMILY = LibraryFamily(family="rez_test", source="folder 'rez-test'")
+FAMILY = LibraryFamily(family="rez_test", source="folder 'rez-test'", folder="rez-test")
 
 
 def _manifest(tmp_path: Path, **overrides: object) -> LibraryManifest:
@@ -84,8 +84,11 @@ class TestEditPackage:
         assert values["version"] == "0.1.0"
         assert values["requires"] == ["griptape_nodes_library_standard_edit", "tabulate-0.9+"]
         run = run_commands(content, root="/store/rez_test_edit/0.1.0")
-        assert run.environ["PYTHONPATH"] == "/store/rez_test_edit/0.1.0/python"
-        assert run.environ["GTN_LIBRARY_PATHS"] == "/store/rez_test_edit/0.1.0/python/griptape_nodes_library.json"
+        # Under the repository/folder name, which is how the engine recognises a library dependency.
+        assert run.environ["PYTHONPATH"] == "/store/rez_test_edit/0.1.0/python/rez-test"
+        assert (
+            run.environ["GTN_LIBRARY_PATHS"] == "/store/rez_test_edit/0.1.0/python/rez-test/griptape_nodes_library.json"
+        )
         assert run.environ["GTN_LIBRARY_WORKER_REQUESTS"] == "Rez Test Library=rez_test==0.1.0"
         # Written with literal(), so rez expands nothing in the library's name.
         assert run.literals == ["Rez Test Library=rez_test==0.1.0"]
@@ -129,8 +132,8 @@ class TestWriteLibraryPackages:
         )
 
         edit_dir = store / "rez_test_edit" / "0.1.0"
-        assert (edit_dir / "python" / "griptape_nodes_library.json").is_file()
-        assert (edit_dir / "python" / "nodes.py").is_file()
+        assert (edit_dir / "python" / "rez-test" / "griptape_nodes_library.json").is_file()
+        assert (edit_dir / "python" / "rez-test" / "nodes.py").is_file()
         assert sorted(p.name for p in (store / "rez_test" / "0.1.0").iterdir()) == ["package.py"]
         # Staging folders are gone.
         assert [p.name for p in (store / "rez_test_edit").iterdir()] == ["0.1.0"]
@@ -240,7 +243,9 @@ class TestLibraryDependencies:
         assert [call.args[0] for call in build.call_args_list] == [self.STANDARD, self.EXTRA]
         assert all(call.args[2].interactive is False for call in build.call_args_list)
 
-    def test_dependency_already_in_the_store_is_not_rebuilt(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
+    def test_dependency_already_in_the_store_is_built_only_with_rebuild(
+        self, tmp_path: Path, fake_tools: FakeRezTools
+    ) -> None:
         existing = tmp_path / "store" / "griptape_nodes_library_standard_edit" / "0.86.0" / "package.py"
         existing.parent.mkdir(parents=True)
         existing.write_text("", encoding="utf-8")
@@ -249,6 +254,10 @@ class TestLibraryDependencies:
         with patch.object(library, "build_library_from_git") as build:
             build_library_dependencies(manifest, _options(tmp_path, fake_tools))
         build.assert_not_called()
+
+        with patch.object(library, "build_library_from_git") as build:
+            build_library_dependencies(manifest, _options(tmp_path, fake_tools, rebuild=True))
+        assert build.call_args.args[2].rebuild is True
 
     def test_failed_required_dependency_stops(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
         manifest = _manifest(tmp_path, library_dependencies=[LibraryDependency(self.STANDARD, required=True)])
@@ -273,12 +282,12 @@ class TestLibraryDependencies:
 
 class TestValidateLibrary:
     def _published(self, store: Path, request: str) -> str:
-        manifest = store / "rez_test_edit" / "0.1.0" / "python" / "griptape_nodes_library.json"
+        manifest = store / "rez_test_edit" / "0.1.0" / "python" / "rez-test" / "griptape_nodes_library.json"
         return json.dumps({"GTN_LIBRARY_PATHS": str(manifest), "GTN_LIBRARY_WORKER_REQUESTS": request})
 
     def _store_with_manifest(self, tmp_path: Path) -> Path:
         store = tmp_path / "store"
-        manifest = store / "rez_test_edit" / "0.1.0" / "python" / "griptape_nodes_library.json"
+        manifest = store / "rez_test_edit" / "0.1.0" / "python" / "rez-test" / "griptape_nodes_library.json"
         manifest.parent.mkdir(parents=True)
         manifest.write_text("{}", encoding="utf-8")
         return store

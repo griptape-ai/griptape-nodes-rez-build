@@ -122,6 +122,12 @@ class TestFamily:
         family = library_family(manifest)
         assert family.family == "griptape_nodes_library_rez_test"
         assert family.edit_family == "griptape_nodes_library_rez_test_edit"
+        assert family.folder == "griptape-nodes-library-rez-test"
+
+    def test_folder_names_rez_would_expand_are_refused(self, tmp_path: Path) -> None:
+        manifest = _write_manifest(tmp_path / "nodes-${USER}" / "griptape_nodes_library.json", {})
+        with pytest.raises(BuildError, match="rez would expand"):
+            library_family(manifest)
 
     def test_git_remote_name_wins(self, tmp_path: Path) -> None:
         repo = tmp_path / "checkout"
@@ -133,6 +139,7 @@ class TestFamily:
         )
         family = library_family(manifest)
         assert family.family == "my_nodes"
+        assert family.folder == "My-Nodes"
         assert "My-Nodes" in family.source
 
 

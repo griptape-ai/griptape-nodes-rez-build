@@ -1,6 +1,7 @@
 """``build-library``: a node library as two rez packages.
 
-``<family>_edit`` holds the library's source and manifest and requires what the library needs
+``<family>_edit`` holds the library's source and manifest under ``python/<repository or folder
+name>/`` (the engine recognises a library dependency by that folder name) and requires what the library needs
 to load in the editor (its ``pip_dependencies``) plus the ``_edit`` packages of the libraries it
 declares as dependencies. Its ``commands()`` publish the library to the engine:
 ``GTN_LIBRARY_PATHS`` gets the manifest, ``GTN_LIBRARY_WORKER_REQUESTS`` gets
@@ -226,7 +227,7 @@ def plan_torch_passes(manifest_flags: list[str], torch_backends: list[str] | Non
 
 
 def build_library_dependencies(manifest: LibraryManifest, options: LibraryBuildOptions) -> list[str]:
-    """Build the libraries *manifest* declares, when the store lacks them, and return their requires.
+    """Build the libraries *manifest* declares, when the store lacks them or with --rebuild, and return their requires.
 
     A required dependency becomes ``<family>_edit``; an optional one the weak ``~<family>_edit``,
     which constrains it only when something else brings it in.
@@ -243,11 +244,13 @@ def build_library_dependencies(manifest: LibraryManifest, options: LibraryBuildO
         if dependency.url in options.visited:
             continue
         existing = newest_version([options.store], edit_family)
-        if existing is not None:
-            console.print(f"  Library dependency {edit_family}-{existing} is already in the store.")
+        if existing is not None and not options.rebuild:
+            console.print(
+                f"  Library dependency {edit_family}-{existing} is already in the store (--rebuild rebuilds it)."
+            )
             continue
         console.print(f"[bold]Building library dependency[/bold] {dependency.url} ...")
-        dependency_options = replace(options, rebuild=False, interactive=False)
+        dependency_options = replace(options, interactive=False)
         try:
             build_library_from_git(dependency.url, None, dependency_options)
         except BuildError as exc:
@@ -279,7 +282,7 @@ def write_library_packages(  # noqa: PLR0913
         staged = staging_dir(store / package_family, version)
         try:
             if with_source:
-                copy_tree(manifest.path.parent, staged / "python")
+                copy_tree(manifest.path.parent, staged / "python" / family.folder)
             write_text_atomic(staged / PACKAGE_FILE, content)
             move_into_place(staged, store / package_family / version)
         finally:
@@ -291,7 +294,8 @@ def edit_package_content(
     manifest: LibraryManifest, family: LibraryFamily, version: str, requires: PackageRequires
 ) -> str:
     """``<family>_edit``'s ``package.py``. Every value is written with ``repr()``."""
-    manifest_path = f"{{root}}/python/{manifest.path.name}"
+    library_root = f"{{root}}/python/{family.folder}"
+    manifest_path = f"{library_root}/{manifest.path.name}"
     worker_request = f"{manifest.name}={family.family}=={version}"
     content = GENERATED_HEADER
     content += f"\nname = {family.edit_family!r}\n"
@@ -302,7 +306,7 @@ def edit_package_content(
     content += f"""
 
 def commands():
-    env.PYTHONPATH.append('{{root}}/python')
+    env.PYTHONPATH.append({library_root!r})
     env.GTN_LIBRARY_PATHS.append({manifest_path!r})
     env.GTN_LIBRARY_WORKER_REQUESTS.append(literal({worker_request!r}))
 

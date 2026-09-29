@@ -135,7 +135,10 @@ not given with `--tools`:
   written with `literal()` so rez leaves the placeholders for the engine to fill
 - `--set` values on every platform (`XDG_CONFIG_HOME`, for example)
 - `--config-file`: appended to `REZ_CONFIG_FILE`, after the studio's configuration, so every
-  worker's `rez env` reads it too. For a testing launch package, this is how rez finds a local
+  worker's `rez env` reads it too. Rez replaces an inherited variable the first time a package
+  appends to it (unless the studio lists it in `parent_variables`), so the package reads the
+  studio's value with rez's `getenv()` and sets it back before appending; no rez configuration
+  change is needed, and `append()` uses each platform's own separator. For a testing launch package, this is how rez finds a local
   store: give a rezconfig with `packages_path = ModifyList(prepend=["<store>"])`.
 - `--testing-store` (testing only): recorded in the package as `testing_stores` and sets
   nothing. The engine reads no rez settings, so rez itself has to find the store (see
@@ -146,8 +149,12 @@ not given with `--tools`:
 newest launch package in the store; an existing version is replaced only with `--rebuild`.
 
 The check (on a platform the package is set up for): `rez env griptape_launch==<version>`
-resolves, the engine and app come from the stores, the settings above are set, and each
-library's worker request resolves the way the prefix will run it.
+resolves from rez's configuration, the engine and app come from the stores, the settings above
+are set, and, from inside that environment, each library's worker is started through the prefix
+the way the engine starts it. A store rez does not search yet is added for the check with
+`REZ_PACKAGES_PATH`. When the launch package does not resolve, each library is resolved with the
+engine, then in pairs, and the message names the libraries that conflict and on what package. A
+launch package that fails its check is removed from the store.
 
 ### gpu-config
 

@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -74,12 +75,30 @@ class RezTools:
         """*store* followed by rez's configured search path, without duplicates."""
         return [store, *(path for path in self.search_paths() if not _same_path(path, store))]
 
-    def env(self, request: list[str], command: list[str], *, paths: list[Path] | None = None) -> RezResult:
+    def searches(self, store: Path) -> bool:
+        """Whether rez's configured search path includes *store*."""
+        return any(_same_path(path, store) for path in self.search_paths())
+
+    def env(
+        self,
+        request: list[str],
+        command: list[str],
+        *,
+        paths: list[Path] | None = None,
+        extra_env: dict[str, str] | None = None,
+    ) -> RezResult:
         """``rez env --norc [--paths ...] <request> -- <command>``: resolve and run one command inside."""
         args = ["env", "--norc"]
         if paths is not None:
             args += ["--paths", os.pathsep.join(str(path) for path in paths)]
-        return self.run(["rez", *args, *request, "--", *command], timeout=_RESOLVE_TIMEOUT_SECONDS)
+        return self.run(["rez", *args, *request, "--", *command], timeout=_RESOLVE_TIMEOUT_SECONDS, extra_env=extra_env)
+
+    def resolves(self, request: list[str], *, paths: list[Path]) -> RezResult:
+        """Resolve *request* without running anything in it (``rez env --output``)."""
+        with tempfile.TemporaryDirectory(prefix="griptape_rez_resolve_") as temporary:
+            context = Path(temporary) / "context.rxt"
+            args = ["rez", "env", "--norc", "--paths", os.pathsep.join(str(path) for path in paths), *request]
+            return self.run([*args, "--output", str(context)], timeout=_RESOLVE_TIMEOUT_SECONDS)
 
     def missing_families(self, families: list[str], *, paths: list[Path]) -> list[str]:
         """Which of *families* (``python-3.12``) rez cannot find on *paths*."""
@@ -93,12 +112,15 @@ class RezTools:
                 missing.append(family)
         return missing
 
-    def run(self, args: list[str], *, timeout: int) -> RezResult:
-        """Run a rez tool from this folder with the environment the build tool was started in."""
+    def run(self, args: list[str], *, timeout: int, extra_env: dict[str, str] | None = None) -> RezResult:
+        """Run a rez tool from this folder with the environment the build tool was started in (plus *extra_env*)."""
         command = [str(self._tool(args[0])), *args[1:]]
+        environment = None
+        if extra_env:
+            environment = {**os.environ, **extra_env}
         try:
             completed = subprocess.run(  # noqa: S603
-                command, capture_output=True, text=True, check=False, timeout=timeout
+                command, capture_output=True, text=True, check=False, timeout=timeout, env=environment
             )
         except (OSError, subprocess.SubprocessError) as exc:
             msg = f"Attempted to run {args[0]} from {self.folder}. Failed because: {exc}"

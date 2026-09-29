@@ -23,11 +23,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from griptape_nodes_rez_build.console import console
 from griptape_nodes_rez_build.engine import ENGINE_FAMILY
@@ -44,7 +45,7 @@ from griptape_nodes_rez_build.store import (
 )
 
 if TYPE_CHECKING:
-    from griptape_nodes_rez_build.rez_tools import RezTools
+    from griptape_nodes_rez_build.rez_tools import RezResult, RezTools
 
 LAUNCH_FAMILY = "griptape_launch"
 REZ_PLATFORMS = ("linux", "osx", "windows")
@@ -60,15 +61,30 @@ _PLATFORM_KEYS = {"darwin": "osx", "win32": "windows"}
 
 # Run inside the launch environment: what the engine will see.
 _VALIDATE_SCRIPT = """\
-import json, os
+import json, os, subprocess, sys
 import griptape_nodes, griptape_nodes_app
 names = ("GTN_LIBRARY_PATHS", "GTN_LIBRARY_WORKER_REQUESTS", "GTN_CONFIG_LIBRARY__DEPENDENCY_SOURCE", "GTN_CONFIG_WORKER__COMMAND_PREFIX")
 found = {name: os.environ.get(name, "") for name in names}
 found["griptape_nodes"] = griptape_nodes.__file__
 found["griptape_nodes_app"] = griptape_nodes_app.__file__
+# Start each worker's resolve the way the engine does: the prefix, filled, before this interpreter.
+prefix = json.loads(found["GTN_CONFIG_WORKER__COMMAND_PREFIX"] or "[]")
+workers = []
+for entry in [e for e in found["GTN_LIBRARY_WORKER_REQUESTS"].split(os.pathsep) if e]:
+    name, _, request = entry.partition("=")
+    command = []
+    for word in prefix:
+        if word == "{library_request}":
+            command.extend(request.split())
+        else:
+            command.append(word.replace("{engine_version}", sys.argv[1]).replace("{library_request}", request))
+    command += [sys.executable, "-c", "import griptape_nodes, griptape_nodes_app"]
+    done = subprocess.run(command, capture_output=True, text=True)
+    output = (done.stderr or done.stdout).strip().splitlines()[-8:]
+    workers.append({"name": name, "command": command[: len(command) - 3], "returncode": done.returncode, "output": "\\n".join(output)})
+found["workers"] = workers
 print(json.dumps(found))
 """
-_WORKER_SCRIPT = "import griptape_nodes, griptape_nodes_app"
 
 
 @dataclass(frozen=True)
@@ -172,7 +188,13 @@ def write_launch(options: LaunchOptions) -> None:
     if options.rez_tools is None:
         msg = f"Attempted to check {LAUNCH_FAMILY}-{package.version}. Failed because rez's tools were not found."
         raise BuildError(msg)
-    validate_launch(options.rez_tools, package, store=options.store)
+    try:
+        validate_launch(options.rez_tools, package, store=options.store)
+    except BuildError as exc:
+        # A launch package that does not resolve would be the newest one artists get.
+        shutil.rmtree(options.store / LAUNCH_FAMILY / package.version, ignore_errors=True)
+        msg = f"{exc}\n{LAUNCH_FAMILY}-{package.version} was removed from {options.store}."
+        raise BuildError(msg) from exc
 
 
 def launch_package_content(package: LaunchPackage) -> str:
@@ -226,7 +248,14 @@ def commands():
     # literal(): the engine fills the {{...}} placeholders, rez must leave them alone.
     setenv({ENV_COMMAND_PREFIX!r}, literal(platform_settings['command_prefix']))
     if 'config_file' in platform_settings:
-        env.REZ_CONFIG_FILE.append(literal(platform_settings['config_file']))
+        # Rez replaces a variable the first time a package appends to it, so the studio's
+        # REZ_CONFIG_FILE is carried over explicitly (getenv reads it from the shell rez env was
+        # started in); append() then adds ours with this platform's separator.
+        if defined('REZ_CONFIG_FILE'):
+            setenv('REZ_CONFIG_FILE', literal(getenv('REZ_CONFIG_FILE')))
+            env.REZ_CONFIG_FILE.append(literal(platform_settings['config_file']))
+        else:
+            setenv('REZ_CONFIG_FILE', literal(platform_settings['config_file']))
 {shared_lines}
 
 format_version = 2
@@ -234,7 +263,12 @@ format_version = 2
 
 
 def validate_launch(tools: RezTools, package: LaunchPackage, *, store: Path) -> None:
-    """Resolve the launch package here, then run each library's worker request the way the engine will."""
+    """Resolve the launch package, check what it sets, and start each worker's resolve from inside it.
+
+    The workers are resolved from inside ``rez env griptape_launch`` with the prefix it sets, the
+    path real workers take, so anything the launch package does to rez's own settings (such as
+    ``REZ_CONFIG_FILE``) is part of the check.
+    """
     this_platform = _PLATFORM_KEYS.get(sys.platform, "linux")
     if this_platform not in package.per_platform:
         console.print(
@@ -244,9 +278,16 @@ def validate_launch(tools: RezTools, package: LaunchPackage, *, store: Path) -> 
     paths = tools.paths_with(store)
     request = f"{LAUNCH_FAMILY}=={package.version}"
     console.print(f"[bold]Checking[/bold] rez env {request} ...")
-    result = tools.env([request], ["python", "-c", _VALIDATE_SCRIPT], paths=paths)
+    # Resolved the way an artist resolves it: from rez's configuration. A store rez does not search
+    # yet is added with REZ_PACKAGES_PATH, which the workers started inside inherit.
+    extra_env: dict[str, str] | None = None
+    if not tools.searches(store):
+        extra_env = {"REZ_PACKAGES_PATH": os.pathsep.join(str(path) for path in paths)}
+        console.print(f"  {store} is not on rez's search path; the check adds it with REZ_PACKAGES_PATH.")
+    result = tools.env([request], ["python", "-c", _VALIDATE_SCRIPT, package.engine_version], extra_env=extra_env)
     if not result.succeeded:
         msg = f"Attempted to resolve {request}. Failed because rez reported:\n{result.failure_summary()}"
+        msg += _conflict_report(tools, package, paths=paths)
         raise BuildError(msg)
     try:
         found = json.loads(result.stdout.strip().splitlines()[-1])
@@ -255,6 +296,7 @@ def validate_launch(tools: RezTools, package: LaunchPackage, *, store: Path) -> 
         raise BuildError(msg) from exc
 
     problems = _launch_environment_problems(found, package, platform=this_platform, paths=paths)
+    problems.extend(_worker_problems(found["workers"]))
     if problems:
         msg = f"Attempted to check {request}. Failed because " + "; ".join(problems) + "."
         raise BuildError(msg)
@@ -262,9 +304,12 @@ def validate_launch(tools: RezTools, package: LaunchPackage, *, store: Path) -> 
     console.print(
         f"  [green]rez env {request}: resolves; engine and app from the store; {library_count} library manifest(s)[/green]"
     )
-
-    for entry in _split(found["GTN_LIBRARY_WORKER_REQUESTS"]):
-        _validate_worker(tools, entry, package.engine_version, paths=paths)
+    for worker in found["workers"]:
+        console.print(
+            f"  [green]worker for '{worker['name']}' started from inside the launch environment: resolves[/green]"
+        )
+    if not found["workers"]:
+        console.print("  No library worker requests to check.")
     console.print(f"  Start Griptape Nodes with: [cyan]rez env {LAUNCH_FAMILY} -- gtn[/cyan]")
 
 
@@ -390,18 +435,48 @@ def _launch_environment_problems(
     return problems
 
 
-def _validate_worker(tools: RezTools, entry: str, engine_version: str, *, paths: list[Path]) -> None:
-    """Resolve one library's worker environment the way the prefix will, and import the engine inside it."""
-    name, _, library = entry.partition("=")
-    worker_request = [f"{ENGINE_FAMILY}=={engine_version}", library]
-    worker = tools.env(worker_request, ["python", "-c", _WORKER_SCRIPT], paths=paths)
-    if not worker.succeeded:
-        msg = (
-            f"Attempted to resolve the worker environment of '{name}' (rez env {' '.join(worker_request)}). "
-            f"Failed because rez reported:\n{worker.failure_summary()}"
-        )
-        raise BuildError(msg)
-    console.print(f"  [green]worker for '{name}': rez env {' '.join(worker_request)} resolves[/green]")
+def _worker_problems(workers: list[dict[str, Any]]) -> list[str]:
+    """Workers that did not resolve from inside the launch environment, with rez's reason."""
+    return [
+        f"the worker for '{worker['name']}' ({' '.join(worker['command'])}) did not resolve "
+        f"from inside the launch environment:\n{worker['output']}"
+        for worker in workers
+        if worker["returncode"] != 0
+    ]
+
+
+def _conflict_report(tools: RezTools, package: LaunchPackage, *, paths: list[Path]) -> str:
+    """Which libraries cannot resolve with the engine, or with each other, and on what package.
+
+    Rez names the first conflict it meets. Each library is resolved with the engine alone, then
+    every pair that resolves alone is resolved together, so both sides of a conflict are named.
+    """
+    engine = f"{ENGINE_FAMILY}=={package.engine_version}"
+    alone: list[str] = []
+    lines: list[str] = []
+    for library in package.library_requests:
+        result = tools.resolves([engine, library], paths=paths)
+        if result.succeeded:
+            alone.append(library)
+        else:
+            lines.append(f"  {library} cannot resolve with the engine: {_conflict_line(result)}")
+    for index, first in enumerate(alone):
+        for second in alone[index + 1 :]:
+            result = tools.resolves([engine, first, second], paths=paths)
+            if not result.succeeded:
+                lines.append(f"  {first} and {second} conflict: {_conflict_line(result)}")
+    if not lines:
+        return ""
+    return "\nConflicting libraries:\n" + "\n".join(lines)
+
+
+def _conflict_line(result: RezResult) -> str:
+    """Rez's one-line account of a failed resolve (the package conflict), or its last line."""
+    text = result.stdout + "\n" + result.stderr
+    for line in text.splitlines():
+        if "conflicts occurred" in line or "could not be found" in line:
+            return line.strip()
+    return result.failure_summary(lines=1)
 
 
 def _split(value: str) -> list[str]:

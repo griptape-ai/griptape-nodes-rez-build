@@ -23,6 +23,7 @@ from griptape_nodes_rez_build.launch import (
     validate_launch,
     write_launch,
 )
+from griptape_nodes_rez_build.rez_tools import RezResult
 from tests.unit.conftest import FakeRezTools, failed, ok
 from tests.unit.rex_fake import Stopped, run_commands
 
@@ -101,6 +102,18 @@ class TestContent:
             and node.targets[0].id == "testing_stores"
         )
         assert recorded == {"windows": "P:/testing"}
+
+    def test_config_file_without_a_studio_config(self) -> None:
+        run = run_commands(launch_package_content(_package()), platform="windows")
+        assert run.environ["REZ_CONFIG_FILE"] == "P:/gtn.py"
+
+    def test_studio_config_survives_rez_replacing_appended_variables(self) -> None:
+        # rex_fake replaces an inherited variable on the first append, as rez does; a plain
+        # env.REZ_CONFIG_FILE.append() would leave only P:/gtn.py.
+        run = run_commands(
+            launch_package_content(_package()), platform="windows", environ={"REZ_CONFIG_FILE": "P:/a.py;P:/b.py"}
+        )
+        assert run.environ["REZ_CONFIG_FILE"] == "P:/a.py;P:/b.py" + os.pathsep + "P:/gtn.py"
 
     def test_unconfigured_platform_stops(self) -> None:
         with pytest.raises(Stopped, match="set up for: osx, windows"):
@@ -194,6 +207,15 @@ class TestWriteLaunch:
         with pytest.raises(BuildError, match="already exists"):
             write_launch(self._options(tmp_path, fake_tools, version="1.0.0"))
 
+    def test_launch_package_that_fails_its_check_is_removed(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
+        _add_package(tmp_path, "griptape_nodes_engine", "0.103.0")
+        _add_package(tmp_path, "rez_test_edit", "0.1.0")
+        this_platform = {"darwin": "osx", "win32": "windows"}.get(sys.platform, "linux")
+        fake_tools.env_results = [failed("conflict")]
+        with pytest.raises(BuildError, match="was removed"):
+            write_launch(self._options(tmp_path, fake_tools, tools=[f"{this_platform}=/opt/rez/bin/rez"]))
+        assert not (tmp_path / "griptape_launch" / "1.0.0").exists()
+
     def test_missing_engine(self, tmp_path: Path) -> None:
         _add_package(tmp_path, "rez_test_edit", "0.1.0")
         with pytest.raises(BuildError, match="build-engine"):
@@ -201,32 +223,77 @@ class TestWriteLaunch:
 
 
 class TestValidateLaunch:
-    def _found(self, store: Path, package: LaunchPackage, platform: str, **overrides: str) -> str:
-        found = {
-            "GTN_LIBRARY_PATHS": str(store / "rez_test_edit/0.1.0/python/griptape_nodes_library.json"),
+    def _found(self, store: Path, package: LaunchPackage, platform: str, **overrides: object) -> str:
+        found: dict[str, object] = {
+            "GTN_LIBRARY_PATHS": str(store / "rez_test_edit/0.1.0/python/rez-test/griptape_nodes_library.json"),
             "GTN_LIBRARY_WORKER_REQUESTS": "Rez Test Library=rez_test==0.1.0",
             "GTN_CONFIG_LIBRARY__DEPENDENCY_SOURCE": "environment",
             "GTN_CONFIG_WORKER__COMMAND_PREFIX": json.dumps(package.per_platform[platform].command_prefix),
             "griptape_nodes": str(store / "griptape_nodes_engine/0.103.0/python/griptape_nodes/__init__.py"),
             "griptape_nodes_app": str(store / "griptape_nodes/0.99.0/python/griptape_nodes_app/__init__.py"),
+            "workers": [
+                {
+                    "name": "Rez Test Library",
+                    "command": [
+                        "/opt/rez/bin/rez/rez",
+                        "env",
+                        "--norc",
+                        "griptape_nodes_engine==0.103.0",
+                        "rez_test==0.1.0",
+                        "--",
+                    ],
+                    "returncode": 0,
+                    "output": "",
+                }
+            ],
         }
         found.update(overrides)
         return json.dumps(found)
 
-    def _this_platform_package(self) -> tuple[LaunchPackage, str]:
+    def _this_platform_package(self, **overrides: object) -> tuple[LaunchPackage, str]:
         platform = {"darwin": "osx", "win32": "windows"}.get(sys.platform, "linux")
         settings = PlatformSettings(tools="/opt/rez/bin/rez", testing_store=None, config_file=None)
-        return _package(per_platform={platform: settings}), platform
+        return _package(per_platform={platform: settings}, **overrides), platform
 
-    def test_launch_and_each_worker_are_resolved(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
+    def test_workers_are_started_from_inside_the_launch_environment(
+        self, tmp_path: Path, fake_tools: FakeRezTools
+    ) -> None:
         package, platform = self._this_platform_package()
-        fake_tools.env_results = [ok(self._found(tmp_path, package, platform)), ok("")]
+        fake_tools.configured_paths = [tmp_path]
+        fake_tools.env_results = [ok(self._found(tmp_path, package, platform))]
 
         validate_launch(fake_tools, package, store=tmp_path)
 
-        assert fake_tools.env_calls[0].request == ["griptape_launch==1.0.0"]
-        # The worker's resolve, exactly as the prefix builds it.
-        assert fake_tools.env_calls[1].request == ["griptape_nodes_engine==0.103.0", "rez_test==0.1.0"]
+        call = fake_tools.env_calls[0]
+        assert call.request == ["griptape_launch==1.0.0"]
+        # Resolved from rez's configuration, as an artist would, not with --paths.
+        assert call.paths is None
+        assert call.extra_env is None
+        # The script inside starts the workers itself, with the engine version to fill in.
+        assert call.command[-1] == "0.103.0"
+        assert "subprocess.run(command" in call.command[2]
+
+    def test_store_rez_does_not_search_is_added_for_the_workers_too(
+        self, tmp_path: Path, fake_tools: FakeRezTools
+    ) -> None:
+        package, platform = self._this_platform_package()
+        fake_tools.env_results = [ok(self._found(tmp_path, package, platform))]
+        validate_launch(fake_tools, package, store=tmp_path)
+        assert fake_tools.env_calls[0].extra_env == {"REZ_PACKAGES_PATH": str(tmp_path)}
+
+    def test_worker_that_fails_inside_the_launch_environment_fails_the_build(
+        self, tmp_path: Path, fake_tools: FakeRezTools
+    ) -> None:
+        package, platform = self._this_platform_package()
+        worker = {
+            "name": "Rez Test Library",
+            "command": ["rez", "env", "--norc", "griptape_nodes_engine==0.103.0", "rez_test==0.1.0", "--"],
+            "returncode": 1,
+            "output": "package family not found: python (searched: ~/packages)",
+        }
+        fake_tools.env_results = [ok(self._found(tmp_path, package, platform, workers=[worker]))]
+        with pytest.raises(BuildError, match="package family not found: python"):
+            validate_launch(fake_tools, package, store=tmp_path)
 
     def test_wrong_prefix_fails(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
         package, platform = self._this_platform_package()
@@ -234,10 +301,36 @@ class TestValidateLaunch:
         with pytest.raises(BuildError, match="GTN_CONFIG_WORKER__COMMAND_PREFIX"):
             validate_launch(fake_tools, package, store=tmp_path)
 
-    def test_worker_that_does_not_resolve_fails(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
-        package, platform = self._this_platform_package()
-        fake_tools.env_results = [ok(self._found(tmp_path, package, platform)), failed("conflict: huggingface_hub")]
-        with pytest.raises(BuildError, match="worker environment of 'Rez Test Library'"):
+    def test_conflict_names_the_libraries_on_both_sides(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
+        libraries = ["conflict_a_edit==1.0.0", "conflict_b_edit==1.0.0", "rez_test_edit==0.1.0"]
+        package, _ = self._this_platform_package(library_requests=libraries)
+        conflict = "The following package conflicts occurred: (tabulate<0.9 <--!--> tabulate-0.9+)"
+        fake_tools.env_results = [failed(conflict)]
+
+        def answer(request: list[str]) -> RezResult:
+            # The engine plus a pair: conflict_a conflicts with either other library.
+            if "conflict_a_edit==1.0.0" in request and request != [request[0], "conflict_a_edit==1.0.0"]:
+                return RezResult(1, conflict, "")
+            return RezResult(0, "", "")
+
+        fake_tools.resolve_answer = answer
+        with pytest.raises(BuildError) as raised:
+            validate_launch(fake_tools, package, store=tmp_path)
+
+        message = str(raised.value)
+        assert "conflict_a_edit==1.0.0 and conflict_b_edit==1.0.0 conflict: " + conflict in message
+        assert "conflict_a_edit==1.0.0 and rez_test_edit==0.1.0 conflict" in message
+        assert "conflict_b_edit==1.0.0 and rez_test_edit==0.1.0" not in message
+
+    def test_library_that_cannot_resolve_with_the_engine_is_named(
+        self, tmp_path: Path, fake_tools: FakeRezTools
+    ) -> None:
+        package, _ = self._this_platform_package()
+        fake_tools.env_results = [failed("conflict")]
+        fake_tools.resolve_answer = lambda _request: RezResult(1, "", "Package could not be found: humanize-9+")
+        with pytest.raises(
+            BuildError, match=r"rez_test_edit==0\.1\.0 cannot resolve with the engine: Package could not be found"
+        ):
             validate_launch(fake_tools, package, store=tmp_path)
 
     def test_platform_without_settings_is_not_checked(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:

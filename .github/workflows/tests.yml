@@ -39,8 +39,7 @@ jobs:
         # Called directly rather than through make, which Windows runners cannot always spawn.
         run: uv run pytest -n auto tests/unit
 
-  # The torch build guard against real rez. Windows is skipped by the tests themselves:
-  # rez-bind python symlinks the interpreter there.
+  # The torch build guard against real rez, on every platform studios run it on.
   integration-test:
     runs-on: ${{ matrix.os }}
     env:
@@ -50,8 +49,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.12", "3.13"]
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -61,6 +63,10 @@ jobs:
         # The version the tool is tested with (README, "Requirements").
         run: |
           uv tool install --python ${{ matrix.python-version }} rez==3.4.0
-          echo "GRIPTAPE_NODES_REZ_TOOLS=$(uv tool dir)/rez/bin" >> "$GITHUB_ENV"
+          # bin/ on Linux and macOS, Scripts/ on Windows: use wherever rez-env landed.
+          rez_env=$(find "$(uv tool dir)/rez" -maxdepth 2 \( -name rez-env -o -name rez-env.exe \) | head -1)
+          echo "rez-env: $rez_env"
+          echo "GRIPTAPE_NODES_REZ_TOOLS=$(dirname "$rez_env")" >> "$GITHUB_ENV"
       - name: Run integration tests
-        run: make test/integration
+        # Called directly rather than through make, which Windows runners cannot always spawn.
+        run: uv run pytest tests/integration

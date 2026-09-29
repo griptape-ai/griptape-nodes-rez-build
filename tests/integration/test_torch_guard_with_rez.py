@@ -1,6 +1,7 @@
 """The torch build guard and per-machine implicit packages, resolved by real rez.
 
 Needs rez: set GRIPTAPE_NODES_REZ_TOOLS to the folder holding rez-env (or put rez-env on PATH).
+Runs on Linux, macOS, and Windows.
 Everything happens in a temporary store with a temporary rezconfig; no other configuration is
 read or changed. The torch "builds" are empty packages written by the same code that writes
 real ones, with this machine's platform so rez can resolve them here.
@@ -12,7 +13,6 @@ import functools
 import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -32,10 +32,20 @@ def _rez_python() -> Path:
     of the interpreter rez runs on (rez 3.4.0), so binding any other Python mixes two standard
     libraries ("SRE module mismatch"). The tests bind this one and build for its version.
     """
-    first_line = (_tools().folder / "rez-env").read_text(encoding="utf-8").splitlines()[0]
-    if not first_line.startswith("#!"):
-        pytest.skip("cannot tell which Python rez runs on: rez-env has no #! line")
-    return Path(first_line[2:].strip())
+    folder = _tools().folder
+    script = folder / "rez-env"
+    if script.is_file():
+        with script.open("rb") as handle:
+            first_line = handle.readline().decode("utf-8", errors="replace").strip()
+        if first_line.startswith("#!"):
+            return Path(first_line[2:].strip())
+    # On Windows the tools are .exe launchers with no #! line; a pip or uv install keeps them next
+    # to the environment's own interpreter.
+    for name in ("python.exe", "python"):
+        candidate = folder / name
+        if candidate.is_file():
+            return candidate
+    pytest.skip(f"cannot tell which Python rez runs on from {folder}")
 
 
 @functools.cache
@@ -60,8 +70,6 @@ def _tools() -> RezTools:
 @pytest.fixture
 def rez_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A store with platform/arch/os/python bound, torch built for cpu and cu128, and a library needing torch."""
-    if sys.platform == "win32":
-        pytest.skip("POSIX only: rez-bind python symlinks the interpreter")
     tools = _tools()
     store = tmp_path / "store"
     store.mkdir()
@@ -116,6 +124,10 @@ def rez_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         variant=[f"python-{_python_version()}"],
         platform_requires={"*": [], "windows-AMD64": ["colorama"]},
     )
+
+    # click's late requires() asks for colorama on Windows only; an empty package lets it resolve there.
+    (store / "colorama" / "0.4.6").mkdir(parents=True)
+    (store / "colorama" / "0.4.6" / "package.py").write_text("name = 'colorama'\nversion = '0.4.6'\n", encoding="utf-8")
 
     library_dir = store / "torch_nodes" / "1.0.0"
     library_dir.mkdir(parents=True)

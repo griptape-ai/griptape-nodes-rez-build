@@ -13,6 +13,7 @@ import functools
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -93,12 +94,10 @@ def rez_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         if name.startswith("REZ_"):
             monkeypatch.delenv(name)
     monkeypatch.setenv("REZ_CONFIG_FILE", str(config))
-    # Without --exe, rez-bind python binds the first `python` on PATH, which on a CI runner can be
-    # the system Python. The one rez runs on is the only one it binds consistently (_rez_python).
-    bindings = [["platform"], ["arch"], ["os"], ["python", "--exe", str(_rez_python())]]
-    for binding in bindings:
-        result = tools.run(["rez-bind", *binding], timeout=120)
+    for binding in ("platform", "arch", "os"):
+        result = tools.run(["rez-bind", binding], timeout=120)
         assert result.succeeded, result.failure_summary()
+    _bind_python(tools, store)
 
     info = WheelInfo(
         pip_name="torch",
@@ -150,6 +149,37 @@ def rez_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         encoding="utf-8",
     )
     return store
+
+
+def _bind_python(tools: RezTools, store: Path) -> None:
+    """Add a python package for the interpreter rez runs on (see _rez_python).
+
+    On Windows rez-bind python links the interpreter as bin/python, with no .exe, which cmd cannot
+    run: `rez env -- python ...` then exits 0 having run nothing. There the package puts the
+    interpreter's own folder on PATH instead, as the full-flow harness does. Elsewhere rez-bind is
+    used, given the interpreter with --exe; without it, it binds the first `python` on PATH, which
+    on a CI runner can be the system Python.
+    """
+    interpreter = _rez_python()
+    if sys.platform != "win32":
+        result = tools.run(["rez-bind", "python", "--exe", str(interpreter)], timeout=120)
+        assert result.succeeded, result.failure_summary()
+        return
+    version = subprocess.run(  # noqa: S603
+        [str(interpreter), "-c", "import platform; print(platform.python_version())"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    arch = os.environ.get("PROCESSOR_ARCHITECTURE", "AMD64")
+    package_dir = store / "python" / version
+    package_dir.mkdir(parents=True)
+    (package_dir / "package.py").write_text(
+        f"name = 'python'\nversion = {version!r}\ntools = ['python']\n"
+        f"variants = [['platform-windows', 'arch-{arch}']]\n\n"
+        f"def commands():\n    env.PATH.prepend({str(interpreter.parent)!r})\n",
+        encoding="utf-8",
+    )
 
 
 def _with_implicit(store: Path, backend: str) -> None:

@@ -6,6 +6,10 @@ engine for that environment:
 
 - ``GTN_CONFIG_LIBRARY__DEPENDENCY_SOURCE=environment``: the engine loads exactly the libraries
   the ``_edit`` packages publish in ``GTN_LIBRARY_PATHS`` and never builds virtualenvs.
+- ``--config-file``: appended to ``REZ_CONFIG_FILE``, after the studio's configuration, so the
+  worker's ``rez env`` reads it too. ``--testing-store`` is recorded in the package
+  (``testing_stores``) and sets nothing: the engine reads no rez settings, so rez itself has to
+  find the store through ``--config-file``.
 - ``GTN_CONFIG_WORKER__COMMAND_PREFIX``: each library's worker starts inside
   ``rez env --norc griptape_nodes_engine==<engine> <library request> --``, with the absolute rez
   path of that platform. The engine fills ``{engine_version}`` and ``{library_request}``.
@@ -125,6 +129,15 @@ def write_launch(options: LaunchOptions) -> None:
     _check_absolute(testing_stores, "--testing-store")
     _check_absolute(config_files, "--config-file")
     shared = parse_set_values(options.set_values)
+    if not options.libraries:
+        console.print(
+            "[yellow]No --library given: the launch package provides the engine only, and no libraries will load.[/yellow]"
+        )
+    if testing_stores and not config_files:
+        console.print(
+            "[yellow]--testing-store is recorded in the package only. Give a rezconfig that adds the store with "
+            "--config-file so workers find it.[/yellow]"
+        )
     stores = [options.store, *_search_paths(options.rez_tools)]
 
     package = LaunchPackage(
@@ -168,8 +181,6 @@ def launch_package_content(package: LaunchPackage) -> str:
     for platform in sorted(package.per_platform):
         platform_settings = package.per_platform[platform]
         values = {"command_prefix": json.dumps(platform_settings.command_prefix)}
-        if platform_settings.testing_store is not None:
-            values["testing_store"] = platform_settings.testing_store
         if platform_settings.config_file is not None:
             values["config_file"] = platform_settings.config_file
         settings[platform] = values
@@ -178,6 +189,18 @@ def launch_package_content(package: LaunchPackage) -> str:
     platforms = ", ".join(sorted(package.per_platform))
     requires = [f"{ENGINE_FAMILY}=={package.engine_version}", *package.library_requests]
     built = datetime.now(UTC).isoformat(timespec="seconds")
+    testing_stores = {
+        platform: configured.testing_store
+        for platform, configured in sorted(package.per_platform.items())
+        if configured.testing_store is not None
+    }
+    testing_block = ""
+    if testing_stores:
+        testing_block = (
+            "\n# Testing launch package: the local stores it was tested with, per platform. Recorded only; the engine\n"
+            "# reads no rez settings. Rez finds these stores through the rezconfig given with --config-file.\n"
+            f"testing_stores = {testing_stores!r}\n"
+        )
     stop_message = f"{LAUNCH_FAMILY} is not set up for this platform (set up for: {platforms}). Platform: "
 
     return f"""{GENERATED_HEADER}# Start Griptape Nodes with: rez env {LAUNCH_FAMILY} -- gtn
@@ -191,7 +214,7 @@ description = 'Starts Griptape Nodes with the engine and node libraries from rez
 build_time = {built!r}
 
 requires = {list_literal(requires)}
-
+{testing_block}
 
 def commands():
     settings = {{
@@ -204,10 +227,6 @@ def commands():
     setenv({ENV_COMMAND_PREFIX!r}, literal(platform_settings['command_prefix']))
     if 'config_file' in platform_settings:
         env.REZ_CONFIG_FILE.append(literal(platform_settings['config_file']))
-    if 'testing_store' in platform_settings:
-        # Workers search the testing store first, then wherever this launch resolved from.
-        setenv('REZ_PACKAGES_PATH', literal(platform_settings['testing_store']))
-        env.REZ_PACKAGES_PATH.append(literal(str(env.REZ_USED_PACKAGES_PATH)))
 {shared_lines}
 
 format_version = 2

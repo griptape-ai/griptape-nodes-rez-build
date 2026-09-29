@@ -82,18 +82,25 @@ class TestContent:
         assert "REZ_PACKAGES_PATH" not in run.environ
         assert "REZ_CONFIG_FILE" not in run.environ
 
-    def test_testing_store_and_config_file(self) -> None:
-        run = run_commands(
-            launch_package_content(_package()),
-            platform="windows",
-            environ={"REZ_USED_PACKAGES_PATH": "P:/released", "REZ_CONFIG_FILE": "P:/studio.py"},
-        )
+    def test_testing_store_is_recorded_and_config_file_is_layered(self) -> None:
+        content = launch_package_content(_package())
+        run = run_commands(content, platform="windows", environ={"REZ_CONFIG_FILE": "P:/studio.py"})
 
         prefix = json.loads(run.environ["GTN_CONFIG_WORKER__COMMAND_PREFIX"])
         assert prefix[0] == "P:/rez/bin/rez/rez"
-        assert run.environ["REZ_PACKAGES_PATH"] == os.pathsep.join(["P:/testing", "P:/released"])
         # Layered after the studio's configuration, never replacing it.
         assert run.environ["REZ_CONFIG_FILE"] == os.pathsep.join(["P:/studio.py", "P:/gtn.py"])
+        # The engine reads no rez settings, so the testing store sets nothing; it is recorded.
+        assert "REZ_PACKAGES_PATH" not in run.environ
+        assert not any("P:/testing" in value for value in run.environ.values())
+        recorded = next(
+            ast.literal_eval(node.value)
+            for node in ast.parse(content).body
+            if isinstance(node, ast.Assign)
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "testing_stores"
+        )
+        assert recorded == {"windows": "P:/testing"}
 
     def test_unconfigured_platform_stops(self) -> None:
         with pytest.raises(Stopped, match="set up for: osx, windows"):
@@ -166,6 +173,15 @@ class TestWriteLaunch:
 
         assert "name = 'griptape_launch'" in capsys.readouterr().out
         assert not (tmp_path / "griptape_launch").exists()
+
+    def test_engine_only_launch_package(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        _add_package(tmp_path, "griptape_nodes_engine", "0.103.0")
+
+        write_launch(self._options(tmp_path, None, libraries=[], print_only=True))
+
+        output = capsys.readouterr().out
+        assert "'griptape_nodes_engine==0.103.0',\n]" in output
+        assert "no libraries will load" in " ".join(output.split())
 
     def test_relative_tools_path_is_refused(self, tmp_path: Path) -> None:
         with pytest.raises(BuildError, match="not an absolute path on windows"):

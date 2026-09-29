@@ -91,13 +91,15 @@ griptape-nodes-rez build-library (--git-url URL [--branch REF] | --local-path PA
 Packages a node library as two packages, named after the repository or folder it was built from
 (`griptape-nodes-library-standard` -> `griptape_nodes_library_standard`), never its display name:
 
-- `<family>_edit`: the library's source and manifest, requiring its `pip_dependencies` and the
+- `<family>_edit`: the library's source and manifest under `python/<repository or folder name>/`
+  (the engine recognises a declared library dependency by that folder name in the manifest's
+  path), requiring its `pip_dependencies` and the
   `_edit` packages of the libraries it declares (`library_dependency`; weak `~<family>_edit` for
   `required: false`). Its `commands()` publish the library to the engine:
 
   ```python
-  env.PYTHONPATH.append("{root}/python")
-  env.GTN_LIBRARY_PATHS.append("{root}/python/griptape_nodes_library.json")
+  env.PYTHONPATH.append("{root}/python/griptape-nodes-library-rez-test")
+  env.GTN_LIBRARY_PATHS.append("{root}/python/griptape-nodes-library-rez-test/griptape_nodes_library.json")
   env.GTN_LIBRARY_WORKER_REQUESTS.append(literal("Rez Test Library=griptape_nodes_library_rez_test==0.1.0"))
   ```
 
@@ -107,8 +109,9 @@ Packages a node library as two packages, named after the repository or folder it
 
 Both use the manifest's version ranges. The version comes from `pyproject.toml` next to the
 manifest (or up to four folders above), then `git describe --tags`, then the manifest's
-`library_version`, then `1.0.0`. Declared library dependencies missing from the store are cloned
-and built first. Existing packages of the same version are kept unless `--rebuild`.
+`library_version`, then `1.0.0`. Declared library dependencies are cloned and built first when
+the store has no `_edit` package for them, or always with `--rebuild` (which also rebuilds their
+dependencies). Existing packages of the same version are kept unless `--rebuild`.
 
 The check: both packages resolve from the store, and `GTN_LIBRARY_PATHS` and
 `GTN_LIBRARY_WORKER_REQUESTS` hold this library's manifest and worker request.
@@ -123,16 +126,20 @@ griptape-nodes-rez write-launch --tools PLATFORM=PATH ... --library FAMILY[-VERS
 
 Writes `griptape_launch`, requiring `griptape_nodes_engine==<engine>` and the chosen libraries'
 `<family>_edit==<version>` (the newest in the store or on rez's search path when no version is
-given). Its `commands()` pick the settings for `system.platform` and stop on a platform that was
+given). Without `--library` the package provides the engine only, and the command warns that no
+libraries will load. Its `commands()` pick the settings for `system.platform` and stop on a platform that was
 not given with `--tools`:
 
 - `GTN_CONFIG_LIBRARY__DEPENDENCY_SOURCE=environment`
 - `GTN_CONFIG_WORKER__COMMAND_PREFIX=["<tools>/rez", "env", "--norc", "griptape_nodes_engine=={engine_version}", "{library_request}", "--"]`,
   written with `literal()` so rez leaves the placeholders for the engine to fill
 - `--set` values on every platform (`XDG_CONFIG_HOME`, for example)
-- `--config-file`: appended to `REZ_CONFIG_FILE`, after the studio's configuration
-- `--testing-store` (testing only): workers search this store first, then wherever the launch
-  package was resolved from (`REZ_USED_PACKAGES_PATH`)
+- `--config-file`: appended to `REZ_CONFIG_FILE`, after the studio's configuration, so every
+  worker's `rez env` reads it too. For a testing launch package, this is how rez finds a local
+  store: give a rezconfig with `packages_path = ModifyList(prepend=["<store>"])`.
+- `--testing-store` (testing only): recorded in the package as `testing_stores` and sets
+  nothing. The engine reads no rez settings, so rez itself has to find the store (see
+  `--config-file`).
 
 `--tools` paths must be absolute on their platform; `PLATFORM` is `linux`, `osx`, or `windows`.
 `--print` shows the package instead of writing it. `--version` defaults to one patch above the

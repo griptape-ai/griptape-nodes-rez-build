@@ -65,6 +65,29 @@ def rez_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         (store / "torch" / "2.7.0" / Path(*variant) / "python").mkdir(parents=True)
         _write_package_py(store / "torch" / "2.7.0", "torch", info, [], variant=variant)
 
+    # A pure package whose requires differ by platform, written the way real ones are: its
+    # late-bound requires() is what made rez 3.4.0 hand commands() an empty `ephemerals`.
+    pure = WheelInfo(
+        pip_name="click",
+        version="8.1.0",
+        description="",
+        authors=[],
+        requires_python=None,
+        console_scripts=[],
+        is_pure_python=True,
+        platform_tag="any",
+        requires_dist=[],
+    )
+    (store / "click" / "8.1.0" / f"python-{PYTHON_VERSION}" / "python").mkdir(parents=True)
+    _write_package_py(
+        store / "click" / "8.1.0",
+        "click",
+        pure,
+        [],
+        variant=[f"python-{PYTHON_VERSION}"],
+        platform_requires={"*": [], "windows-AMD64": ["colorama"]},
+    )
+
     library_dir = store / "torch_nodes" / "1.0.0"
     library_dir.mkdir(parents=True)
     (library_dir / "package.py").write_text(
@@ -82,10 +105,14 @@ def _with_implicit(store: Path, backend: str) -> None:
     )
 
 
+LATE = "click"  # the package with a late-bound requires()
+
+
 class TestTorchGuard:
     @pytest.mark.usefixtures("rez_store")
-    def test_without_implicit_the_environment_stops_with_the_fix(self) -> None:
-        result = _tools().run_python(["torch_nodes"], CHECK)
+    @pytest.mark.parametrize("request_", [["torch_nodes"], ["torch_nodes", LATE]])
+    def test_without_implicit_the_environment_stops_with_the_fix(self, request_: list[str]) -> None:
+        result = _tools().run_python(request_, CHECK)
 
         assert not result.succeeded
         output = result.stderr + result.stdout
@@ -96,22 +123,46 @@ class TestTorchGuard:
     def test_implicit_selects_its_build(self, rez_store: Path, backend: str) -> None:
         _with_implicit(rez_store, backend)
 
-        result = _tools().run_python(["torch_nodes"], CHECK)
+        result = _tools().run_python(["torch_nodes", LATE], CHECK)
 
         assert result.succeeded, result.failure_summary()
         assert "torch-2.7.0" in result.stdout
-        root = _tools().run_python(["torch_nodes"], "import os; print(os.environ['REZ_TORCH_ROOT'])")
+        assert "click-8.1.0" in result.stdout
+        root = _tools().run_python(["torch_nodes", LATE], "import os; print(os.environ['REZ_TORCH_ROOT'])")
         assert root.stdout.strip().endswith(f".torch_backend-{backend}")
 
     @pytest.mark.usefixtures("rez_store")
-    def test_explicit_request_also_satisfies_the_guard(self) -> None:
-        result = _tools().run_python(["torch_nodes", ".torch_backend-cu128"], CHECK)
+    @pytest.mark.parametrize("backend", ["cpu", "cu128"])
+    def test_explicit_request_also_satisfies_the_guard_on_its_variant(self, backend: str) -> None:
+        request_ = ["torch_nodes", LATE, f".torch_backend-{backend}"]
+        result = _tools().run_python(request_, CHECK)
         assert result.succeeded, result.failure_summary()
+        root = _tools().run_python(request_, "import os; print(os.environ['REZ_TORCH_ROOT'])")
+        assert root.stdout.strip().endswith(f".torch_backend-{backend}")
 
     def test_implicit_for_a_build_that_is_not_in_the_store_fails_to_resolve(self, rez_store: Path) -> None:
         _with_implicit(rez_store, "cu118")
         result = _tools().run_python(["torch_nodes"], CHECK)
         assert not result.succeeded
+
+    def test_rez_hands_commands_empty_ephemerals_next_to_a_late_requires(self, rez_store: Path) -> None:
+        """Why the guard reads this.variant_requires: a guard on `ephemerals` never fires here."""
+        package_dir = rez_store / "ephemeral_guard" / "1.0"
+        for backend in ("cu118", "cu128"):
+            (package_dir / f".torch_backend-{backend}").mkdir(parents=True)
+        (package_dir / "package.py").write_text(
+            "name = 'ephemeral_guard'\nversion = '1.0'\n"
+            "variants = [['.torch_backend-cu118'], ['.torch_backend-cu128']]\n"
+            "def commands():\n"
+            "    if 'torch_backend' in ephemerals and '.torch_backend' not in implicits:\n"
+            "        stop('guard fired')\n",
+            encoding="utf-8",
+        )
+        alone = _tools().run_python(["ephemeral_guard", f"python-{PYTHON_VERSION}"], "print('ran')")
+        with_late = _tools().run_python(["ephemeral_guard", LATE], "print('ran')")
+
+        assert not alone.succeeded
+        assert with_late.succeeded  # rez 3.4.0: the ephemerals-based guard is silently skipped
 
     @pytest.mark.usefixtures("rez_store")
     def test_packages_without_torch_builds_are_unaffected(self) -> None:

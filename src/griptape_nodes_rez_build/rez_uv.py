@@ -433,11 +433,17 @@ _PYTORCH_INDEX = re.compile(r"download\.pytorch\.org/whl/")
 # ephemeral in a variant just by resolving it, so without a choice from the machine it would
 # quietly pick one of the builds. This stops the environment instead, unless the machine's
 # rezconfig (implicit_packages) or the request itself names the build.
+#
+# The resolved variant's own requirements say which build it is (this.variant_requires). The
+# `ephemerals` binding cannot be used: rez 3.4.0 builds it once and caches it, and when any
+# package in the resolve has a late-bound requires() it is built during the solve, before the
+# ephemerals are known, so commands() see it empty.
 TORCH_BACKEND_GUARD = """\
-    if 'torch_backend' in ephemerals and '.torch_backend' not in implicits and '.torch_backend' not in request:
+    builds = [str(requirement) for requirement in this.variant_requires if str(requirement).startswith('.torch_backend-')]
+    if builds and '.torch_backend' not in implicits and '.torch_backend' not in request:
         stop(
             this.name + ' ' + str(this.version) + ' is built for several torch builds, and this machine has not '
-            'chosen one, so rez would pick ' + ephemerals.get('torch_backend') + ' on its own. On this machine, run '
+            'chosen one, so rez would pick ' + builds[0] + ' on its own. On this machine, run '
             '"griptape-nodes-rez gpu-config" and add the implicit_packages line it prints to this machine\\'s '
             'rezconfig, or request the build explicitly (for example .torch_backend-cu128).'
         )"""

@@ -218,21 +218,24 @@ class TestTorchBuildGuard:
         assert "torch_backend" not in (tmp_path / "package.py").read_text(encoding="utf-8")
 
     @pytest.mark.parametrize(
-        ("ephemerals", "implicits", "requested", "stops"),
+        ("variant_requires", "implicits", "requested", "stops"),
         [
-            ({"torch_backend": ".torch_backend-cu128"}, {}, {}, True),
-            ({"torch_backend": ".torch_backend-cu128"}, {".torch_backend": ".torch_backend-cu128"}, {}, False),
-            ({"torch_backend": ".torch_backend-cu128"}, {}, {".torch_backend": ".torch_backend-cu128"}, False),
-            ({}, {}, {}, False),
+            (["python-3.12", ".torch_backend-cu128"], {}, {}, True),
+            (["python-3.12", ".torch_backend-cu128"], {".torch_backend": ".torch_backend-cu128"}, {}, False),
+            (["python-3.12", ".torch_backend-cu128"], {}, {".torch_backend": ".torch_backend-cu128"}, False),
+            # This platform's variant has no torch build (macOS): nothing to choose.
+            (["platform-osx", "arch-arm64", "python-3.12"], {}, {}, False),
         ],
     )
     def test_guard_logic(
-        self, ephemerals: dict[str, str], implicits: dict[str, str], requested: dict[str, str], *, stops: bool
+        self, variant_requires: list[str], implicits: dict[str, str], requested: dict[str, str], *, stops: bool
     ) -> None:
         stopped: list[str] = []
-        this = type("This", (), {"name": "torch", "version": "2.7.0"})()
+        this = type("This", (), {"name": "torch", "version": "2.7.0", "variant_requires": variant_requires})()
         namespace = {
-            "ephemerals": ephemerals,
+            # Empty, as rez 3.4.0 hands commands() when a package in the resolve has a late
+            # requires(): the guard must not depend on it.
+            "ephemerals": {},
             "implicits": implicits,
             "request": requested,
             "this": this,
@@ -245,6 +248,9 @@ class TestTorchBuildGuard:
         if stops:
             assert "gpu-config" in stopped[0]
             assert ".torch_backend-cu128" in stopped[0]
+
+    def test_guard_does_not_read_ephemerals(self) -> None:
+        assert "ephemerals" not in TORCH_BACKEND_GUARD
 
 
 class TestWrittenForRollBack:

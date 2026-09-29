@@ -201,9 +201,16 @@ does not name a build, rez would quietly pick one of the CUDA variants. Every pa
 variant per torch build (torch, torchvision, ...) therefore checks in its `commands()`:
 
 ```python
-if 'torch_backend' in ephemerals and '.torch_backend' not in implicits and '.torch_backend' not in request:
+builds = [str(r) for r in this.variant_requires if str(r).startswith('.torch_backend-')]
+if builds and '.torch_backend' not in implicits and '.torch_backend' not in request:
     stop(... 'run "griptape-nodes-rez gpu-config" and add the implicit_packages line it prints ...')
 ```
+
+The build is read from the resolved variant's own requirements, not from rez's `ephemerals`
+object: rez 3.4.0 builds that object once and caches it, and when any package in the resolve has
+a late-bound `requires()` (the per-platform pip packages do) it is built before the ephemerals
+are known, so `commands()` would see it empty and the guard would never fire. Packages built
+before this change carry the old guard; rebuild them with `--rebuild`.
 
 A torch build chosen by rez alone stops the environment with that message, so `rez env` (and
 the worker) fails instead of running the wrong build. A machine's own implicit package, or an

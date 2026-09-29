@@ -1,20 +1,26 @@
 """``build-engine``: the engine, the ``gtn`` app, the editor, and every pip dependency as rez packages.
 
-The engine package's ``requires`` are the version ranges in the engine's ``pyproject.toml``,
-not the versions this build happened to resolve, so the engine resolves together with node
+The engine is the published ``griptape-nodes-engine`` release by default (the newest one the app
+accepts, or ``--engine-version``), or a local checkout with ``--engine-repo`` for studios that
+change the engine themselves.
+
+The engine package's ``requires`` are the version ranges the engine declares (the release's
+metadata, or the checkout's ``pyproject.toml``), not the versions this build happened to resolve, so the engine resolves together with node
 libraries whose own ranges overlap. Reproducibility comes from released package sets (and
 ``rez env --time``), not from exact pins.
 
 The ``gtn`` app and the prebuilt editor are pinned to the versions this build installed: the
-app is released against specific engine versions and declares an exact engine requirement,
-which the build drops (the engine comes from the checkout), so rez must not swap in another
-app version later.
+app is released against a range of engine versions, and the build resolves it against the one
+engine it packages, so rez must not swap in another app version later.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import shutil
+import subprocess
+import tempfile
 import tomllib
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -23,18 +29,21 @@ from typing import TYPE_CHECKING
 
 import typer
 from rich.panel import Panel
+from uv import find_uv_bin
 
 from griptape_nodes_rez_build.common import (
     PackageRequires,
     check_bindings,
     install_packages,
     package_requires,
+    python_version,
     rolled_back,
+    uv_error_tail,
 )
 from griptape_nodes_rez_build.console import console
-from griptape_nodes_rez_build.errors import BuildError
+from griptape_nodes_rez_build.errors import BuildError, ResolveError
 from griptape_nodes_rez_build.package_py import GENERATED_HEADER, requires_block
-from griptape_nodes_rez_build.rez_uv import pip_normalize
+from griptape_nodes_rez_build.rez_uv import pip_normalize, read_wheel_info, resolve_full
 from griptape_nodes_rez_build.store import (
     PACKAGE_FILE,
     WrittenPackage,
@@ -51,6 +60,8 @@ if TYPE_CHECKING:
 
 ENGINE_FAMILY = "griptape_nodes_engine"
 ENGINE_PIP_NAME = "griptape-nodes-engine"
+# The engine's import package: the only folder the package payload holds.
+ENGINE_IMPORT_NAME = "griptape_nodes"
 # The Griptape Nodes app: the `gtn` command that starts the engine and its workers.
 APP_FAMILY = "griptape_nodes"
 APP_PIP_NAME = "griptape-nodes"
@@ -71,12 +82,20 @@ except importlib.metadata.PackageNotFoundError:
 print(json.dumps(found))
 """
 
+# A Requires-Dist entry that only an extra of the engine brings in (``; extra == 'profiling'``).
+_EXTRA_MARKER = re.compile(r"\bextra\s*==")
+
 
 @dataclass(frozen=True)
 class EngineProject:
-    """What the engine checkout's ``pyproject.toml`` says about the engine."""
+    """The engine being packaged: where its source is, and what it declares."""
 
-    repo: Path
+    # Folder holding the griptape_nodes package: the checkout's src/, or the unpacked release.
+    source: Path
+    # Where the engine came from, for the summary and the package's build_source.
+    origin: str
+    # How uv's resolve names this engine, so the app's engine requirement is met by it.
+    pip_request: str
     version: str
     dependencies: list[str]
     requires_python: str
@@ -84,7 +103,10 @@ class EngineProject:
 
 @dataclass(frozen=True)
 class EngineBuildOptions:
-    engine_repo: Path
+    # A local checkout to build instead of the published engine.
+    engine_repo: Path | None
+    # The published engine version to build; the newest the app accepts when None.
+    engine_version: str | None
     store: Path
     tools: RezTools
     editor: bool
@@ -95,15 +117,27 @@ class EngineBuildOptions:
 
 def build_engine(options: EngineBuildOptions) -> None:
     """Build the engine package and everything it needs, then check it resolves from the store."""
-    project = read_engine_project(options.engine_repo)
     paths = options.tools.paths_with(options.store)
-    check_bindings(options.tools, paths)
     app_request = _app_request(options.app_version, editor=options.editor)
+    if options.engine_repo is not None:
+        project = read_engine_project(options.engine_repo)
+        check_bindings(options.tools, paths)
+        _build_engine_project(project, app_request, paths, options)
+        return
+    check_bindings(options.tools, paths)
+    with tempfile.TemporaryDirectory(prefix="griptape-nodes-engine-") as work_dir:
+        project = fetch_published_engine(options.engine_version, app_request, Path(work_dir))
+        _build_engine_project(project, app_request, paths, options)
+
+
+def _build_engine_project(
+    project: EngineProject, app_request: str, paths: list[Path], options: EngineBuildOptions
+) -> None:
     exists = package_exists(options.store, ENGINE_FAMILY, project.version)
 
     console.print()
     console.print("[bold]Summary:[/bold]")
-    console.print(f"  Engine:       [cyan]{project.repo}[/cyan]")
+    console.print(f"  Engine:       [cyan]{project.origin}[/cyan]")
     console.print(f"  Version:      [green]{project.version}[/green]")
     console.print(f"  Dependencies: [green]{len(project.dependencies)}[/green] direct, required as ranges")
     console.print(f"  gtn app:      [green]{app_request}[/green]")
@@ -123,9 +157,9 @@ def build_engine(options: EngineBuildOptions) -> None:
         raise typer.Abort
 
     options.store.mkdir(parents=True, exist_ok=True)
-    # The engine joins the resolve as this checkout, so the app's requirement on
-    # griptape-nodes-engine is met by the engine being built, never by a PyPI release.
-    requests = [*project.dependencies, app_request, f"{ENGINE_PIP_NAME} @ {project.repo.as_uri()}"]
+    # The engine joins the resolve as the one being built, so the app's requirement on
+    # griptape-nodes-engine is met by it and never by another release.
+    requests = [*project.dependencies, app_request, project.pip_request]
     report = install_packages(
         "the engine's dependencies and the gtn app",
         requests,
@@ -147,10 +181,62 @@ def build_engine(options: EngineBuildOptions) -> None:
         raise rolled_back(exc, written) from exc
 
 
+def fetch_published_engine(engine_version: str | None, app_request: str, work_dir: Path) -> EngineProject:
+    """Unpack the published engine into *work_dir* and read what its metadata declares.
+
+    Without *engine_version* the engine is the newest release the app accepts, chosen by
+    resolving the two together.
+    """
+    engine_request = ENGINE_PIP_NAME
+    if engine_version:
+        engine_request += f"=={engine_version}"
+    console.print(f"[bold]Choosing[/bold] the published engine for {app_request}...")
+    try:
+        resolved = resolve_full([engine_request, app_request], python_version=python_version())
+    except subprocess.CalledProcessError as exc:
+        msg = (
+            f"Attempted to find a published {engine_request} that works with {app_request}. "
+            f"Failed because uv reported:\n{uv_error_tail(exc)}"
+        )
+        raise ResolveError(msg) from exc
+    version = next((p.version for p in resolved if pip_normalize(p.pip_name) == ENGINE_PIP_NAME), None)
+    if version is None:
+        msg = f"Attempted to find a published {engine_request}. Failed because uv's resolve did not include it."
+        raise ResolveError(msg)
+
+    pinned = f"{ENGINE_PIP_NAME}=={version}"
+    download = subprocess.run(  # noqa: S603
+        [find_uv_bin(), "pip", "install", "--no-deps", "--target", str(work_dir), pinned],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if download.returncode != 0:
+        details = uv_error_tail(subprocess.CalledProcessError(download.returncode, "uv", stderr=download.stderr))
+        msg = f"Attempted to download {pinned}. Failed because uv reported:\n{details}"
+        raise ResolveError(msg)
+    if not (work_dir / ENGINE_IMPORT_NAME).is_dir():
+        msg = f"Attempted to unpack {pinned}. Failed because the release has no {ENGINE_IMPORT_NAME} package."
+        raise BuildError(msg)
+    try:
+        info = read_wheel_info(work_dir, ENGINE_PIP_NAME, version)
+    except (OSError, RuntimeError) as exc:
+        msg = f"Attempted to read the metadata of {pinned}. Failed because: {exc}"
+        raise BuildError(msg) from exc
+    return EngineProject(
+        source=work_dir,
+        origin=f"{pinned} (published release)",
+        pip_request=pinned,
+        version=version,
+        dependencies=[requirement for requirement in info.requires_dist if not _EXTRA_MARKER.search(requirement)],
+        requires_python=info.requires_python or "",
+    )
+
+
 def read_engine_project(repo: Path) -> EngineProject:
     """Read the engine's version, dependencies, and Python range from its checkout, as files."""
     pyproject = repo / "pyproject.toml"
-    source = repo / "src" / "griptape_nodes"
+    source = repo / "src" / ENGINE_IMPORT_NAME
     if not pyproject.is_file() or not source.is_dir():
         msg = (
             f"Attempted to read the engine checkout at {repo}. Failed because it has no pyproject.toml or "
@@ -169,7 +255,9 @@ def read_engine_project(repo: Path) -> EngineProject:
         msg = f"Attempted to read the engine version from {pyproject}. Failed because [project] has no version."
         raise BuildError(msg)
     return EngineProject(
-        repo=repo,
+        source=source.parent,
+        origin=str(repo),
+        pip_request=f"{ENGINE_PIP_NAME} @ {repo.as_uri()}",
         version=str(version),
         dependencies=[str(dependency) for dependency in project.get("dependencies", [])],
         requires_python=str(project.get("requires-python", "")),
@@ -205,7 +293,7 @@ def write_engine_package(project: EngineProject, requires: PackageRequires, *, s
     staged = staging_dir(store / ENGINE_FAMILY, project.version)
     try:
         python_dir = staged / "python"
-        copy_tree(project.repo / "src", python_dir)
+        copy_tree(project.source / ENGINE_IMPORT_NAME, python_dir / ENGINE_IMPORT_NAME)
         _write_dist_info(python_dir, project.version)
         write_text_atomic(staged / PACKAGE_FILE, engine_package_content(project, requires))
         move_into_place(staged, version_dir)
@@ -229,7 +317,7 @@ def engine_package_content(project: EngineProject, requires: PackageRequires) ->
     content += f"\nname = {ENGINE_FAMILY!r}\n"
     content += f"\nversion = {project.version!r}\n"
     content += "\ndescription = 'Griptape Nodes engine'\n"
-    content += f"\nbuild_source = {str(project.repo)!r}\n"
+    content += f"\nbuild_source = {project.origin!r}\n"
     content += f"\nbuild_time = {built!r}\n"
     content += requires_block(requires.common, requires.platform)
     content += """

@@ -76,6 +76,34 @@ class TestCommandLine:
         assert result.exit_code == 1
         assert "no rez-env there" in _flat(result.output)
 
+    def test_build_engine_defaults_to_the_published_engine(self, tmp_path: Path) -> None:
+        (tmp_path / "rez-env").write_text("", encoding="utf-8")
+        with patch.object(cli, "build_engine") as build:
+            result = runner.invoke(
+                cli.app,
+                ["build-engine", "--yes", "--local-packages-path", str(tmp_path), "--rez-tools", str(tmp_path)],
+            )
+        assert result.exit_code == 0, result.output
+        options = build.call_args.args[0]
+        assert options.engine_repo is None
+        assert options.engine_version is None
+
+    def test_engine_version_and_engine_repo_are_exclusive(self, tmp_path: Path) -> None:
+        result = runner.invoke(
+            cli.app,
+            [
+                "build-engine",
+                "--engine-repo",
+                str(tmp_path),
+                "--engine-version",
+                "0.102.1",
+                "--local-packages-path",
+                str(tmp_path),
+            ],
+        )
+        assert result.exit_code == 1
+        assert "Pass one of them" in _flat(result.output)
+
     def test_yes_is_passed_as_non_interactive(self, tmp_path: Path) -> None:
         (tmp_path / "rez-env").write_text("", encoding="utf-8")
         with patch.object(cli, "build_engine") as build:

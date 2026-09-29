@@ -31,8 +31,8 @@ Iteration loop: make the change, run `make check` (or `make fix`), fix what it r
 
 ## Rules specific to this repository
 
-- **Never import `griptape_nodes`.** The engine checkout and library manifests are read as files
-  (`pyproject.toml`, `griptape_nodes_library.json`). The tool must work with any engine version.
+- **Never import `griptape_nodes`.** The engine (a published release's metadata, or a checkout's
+  `pyproject.toml`) and library manifests (`griptape_nodes_library.json`) are read as files. The tool must work with any engine version.
 - **Never change rez configuration.** Rez runs with the environment the tool was started in;
   checks point rez at the store being built with `--paths`. Tests use temporary stores and a
   temporary `REZ_CONFIG_FILE`.

@@ -90,7 +90,7 @@ def install_packages(  # noqa: PLR0913
             provided=provided,
         )
     except subprocess.CalledProcessError as exc:
-        msg = f"Attempted to resolve {label} with uv. Failed because uv reported:\n{_uv_error_tail(exc)}"
+        msg = f"Attempted to resolve {label} with uv. Failed because uv reported:\n{uv_error_tail(exc)}"
         raise ResolveError(msg) from exc
     except rez_uv.RezInstallError as exc:
         failures = "\n".join(f"  - {failure}" for failure in exc.failures)
@@ -189,7 +189,8 @@ def _split_by_platform(requirements: list[rez_uv.ParsedRequirement]) -> PackageR
     return PackageRequires(common=sorted(common), platform=per_platform)
 
 
-def _uv_error_tail(exc: subprocess.CalledProcessError) -> str:
+def uv_error_tail(exc: subprocess.CalledProcessError) -> str:
+    """The last lines uv wrote to stderr, for an error message."""
     stderr = (exc.stderr or "").strip()
     if not stderr:
         return f"uv exited with status {exc.returncode}"

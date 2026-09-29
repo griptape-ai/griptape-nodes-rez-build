@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import ast
 import json
-from typing import TYPE_CHECKING
+import subprocess
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -17,18 +18,16 @@ from griptape_nodes_rez_build.engine import (
     build_engine,
     engine_package_content,
     engine_requires,
+    fetch_published_engine,
     read_engine_project,
     validate_engine,
     write_engine_package,
 )
-from griptape_nodes_rez_build.errors import BuildError
+from griptape_nodes_rez_build.errors import BuildError, ResolveError
 from griptape_nodes_rez_build.rez_uv import InstallReport, ResolvedPackage
 from griptape_nodes_rez_build.store import WrittenPackage
 from tests.unit.conftest import FakeRezTools, failed, ok
 from tests.unit.rex_fake import run_commands
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 PYPROJECT = """\
 [project]
@@ -111,9 +110,125 @@ class TestEngineRequires:
             engine_requires(project, RESOLVED, store=tmp_path, editor=True)
 
 
+PUBLISHED_METADATA = """\
+Metadata-Version: 2.4
+Name: griptape-nodes-engine
+Version: 0.102.1
+Requires-Dist: httpx>=0.28.0,<1.0.0
+Requires-Dist: colorama ; sys_platform == 'win32'
+Requires-Dist: austin-dist>=3.7.0 ; extra == 'profiling'
+Requires-Python: >=3.12.0, <3.14
+"""
+
+
+def _unpack_release(target: Path, *, with_package: bool = True) -> None:
+    """What ``uv pip install --no-deps --target`` leaves for the engine release."""
+    if with_package:
+        (target / "griptape_nodes").mkdir(parents=True)
+        (target / "griptape_nodes" / "__init__.py").write_text("", encoding="utf-8")
+    dist_info = target / "griptape_nodes_engine-0.102.1.dist-info"
+    dist_info.mkdir(parents=True)
+    (dist_info / "METADATA").write_text(PUBLISHED_METADATA, encoding="utf-8")
+    (dist_info / "WHEEL").write_text("Tag: py3-none-any\n", encoding="utf-8")
+
+
+def _fake_download(*, with_package: bool = True, returncode: int = 0) -> object:
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if returncode == 0:
+            _unpack_release(Path(command[command.index("--target") + 1]), with_package=with_package)
+        return subprocess.CompletedProcess(command, returncode, stdout="", stderr="error: no such version")
+
+    return run
+
+
+class TestFetchPublishedEngine:
+    def _resolved(self, engine_version: str = "0.102.1") -> list[ResolvedPackage]:
+        return [ResolvedPackage("griptape-nodes-engine", engine_version), ResolvedPackage("griptape-nodes", "0.99.0")]
+
+    def test_newest_engine_the_app_accepts(self, tmp_path: Path) -> None:
+        with (
+            patch.object(engine, "resolve_full", return_value=self._resolved()) as resolve,
+            patch.object(engine.subprocess, "run", side_effect=_fake_download()) as download,
+        ):
+            project = fetch_published_engine(None, "griptape-nodes[editor]", tmp_path)
+
+        assert resolve.call_args.args[0] == ["griptape-nodes-engine", "griptape-nodes[editor]"]
+        assert download.call_args.args[0][-1] == "griptape-nodes-engine==0.102.1"
+        assert project.version == "0.102.1"
+        assert project.pip_request == "griptape-nodes-engine==0.102.1"
+        assert project.source == tmp_path
+        assert project.requires_python == ">=3.12.0, <3.14"
+
+    def test_extras_are_left_out_and_markers_kept(self, tmp_path: Path) -> None:
+        with (
+            patch.object(engine, "resolve_full", return_value=self._resolved()),
+            patch.object(engine.subprocess, "run", side_effect=_fake_download()),
+        ):
+            project = fetch_published_engine(None, "griptape-nodes", tmp_path)
+        assert project.dependencies == ["httpx>=0.28.0,<1.0.0", "colorama ; sys_platform == 'win32'"]
+
+    def test_engine_version_is_requested(self, tmp_path: Path) -> None:
+        with (
+            patch.object(engine, "resolve_full", return_value=self._resolved()) as resolve,
+            patch.object(engine.subprocess, "run", side_effect=_fake_download()),
+        ):
+            fetch_published_engine("0.102.1", "griptape-nodes", tmp_path)
+        assert resolve.call_args.args[0][0] == "griptape-nodes-engine==0.102.1"
+
+    def test_app_and_engine_that_do_not_resolve_fail(self, tmp_path: Path) -> None:
+        error = subprocess.CalledProcessError(1, "uv", stderr="No solution found")
+        with (
+            patch.object(engine, "resolve_full", side_effect=error),
+            pytest.raises(ResolveError, match="No solution found"),
+        ):
+            fetch_published_engine("0.1.0", "griptape-nodes==0.99.0", tmp_path)
+
+    def test_failed_download_fails(self, tmp_path: Path) -> None:
+        with (
+            patch.object(engine, "resolve_full", return_value=self._resolved()),
+            patch.object(engine.subprocess, "run", side_effect=_fake_download(returncode=2)),
+            pytest.raises(ResolveError, match="no such version"),
+        ):
+            fetch_published_engine(None, "griptape-nodes", tmp_path)
+
+    def test_release_without_the_package_fails(self, tmp_path: Path) -> None:
+        with (
+            patch.object(engine, "resolve_full", return_value=self._resolved()),
+            patch.object(engine.subprocess, "run", side_effect=_fake_download(with_package=False)),
+            pytest.raises(BuildError, match="no griptape_nodes package"),
+        ):
+            fetch_published_engine(None, "griptape-nodes", tmp_path)
+
+    def test_package_holds_only_the_engine_and_records_the_release(self, tmp_path: Path) -> None:
+        _unpack_release(tmp_path / "release")
+        project = EngineProject(
+            source=tmp_path / "release",
+            origin="griptape-nodes-engine==0.102.1 (published release)",
+            pip_request="griptape-nodes-engine==0.102.1",
+            version="0.102.1",
+            dependencies=[],
+            requires_python="",
+        )
+        version_dir = write_engine_package(project, PackageRequires(common=[], platform=None), store=tmp_path / "s")
+        assert sorted(p.name for p in (version_dir / "python").iterdir()) == [
+            "griptape_nodes",
+            "griptape_nodes_engine-0.102.1.dist-info",
+        ]
+        assert "build_source = 'griptape-nodes-engine==0.102.1 (published release)'" in (
+            version_dir / "package.py"
+        ).read_text(encoding="utf-8")
+
+
 class TestEnginePackage:
     def test_content_is_valid_python_with_escaped_values(self, tmp_path: Path) -> None:
-        project = EngineProject(repo=tmp_path / "it's a \\", version="0.103.0", dependencies=[], requires_python="")
+        project = EngineProject(
+            source=tmp_path,
+            origin=str(tmp_path / "it's a \\"),
+            pip_request="griptape-nodes-engine==0.103.0",
+            version="0.103.0",
+            dependencies=[],
+            requires_python="",
+        )
         content = engine_package_content(project, PackageRequires(common=["a-1+"], platform=None))
 
         values = {
@@ -170,6 +285,7 @@ class TestBuildEngine:
     def _options(self, tmp_path: Path, tools: FakeRezTools, **overrides: object) -> EngineBuildOptions:
         fields: dict[str, object] = {
             "engine_repo": _engine_repo(tmp_path),
+            "engine_version": None,
             "store": tmp_path / "store",
             "tools": tools,
             "editor": True,
@@ -193,10 +309,27 @@ class TestBuildEngine:
 
         requests = install.call_args.args[1]
         assert "griptape-nodes[editor]==0.99.0" in requests
-        assert f"griptape-nodes-engine @ {options.engine_repo.as_uri()}" in requests
+        assert f"griptape-nodes-engine @ {(tmp_path / 'engine').as_uri()}" in requests
         assert install.call_args.kwargs["provided"] == frozenset({"griptape-nodes-engine"})
         assert (tmp_path / "store" / "griptape_nodes_engine" / "0.103.0" / "package.py").is_file()
         validate.assert_called_once()
+
+    def test_published_engine_by_default(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
+        options = self._options(tmp_path, fake_tools, engine_repo=None)
+        with (
+            patch.object(engine, "resolve_full", return_value=[ResolvedPackage("griptape-nodes-engine", "0.102.1")]),
+            patch.object(engine.subprocess, "run", side_effect=_fake_download()),
+            patch.object(engine, "install_packages", return_value=self._report()) as install,
+            patch.object(engine, "validate_engine") as validate,
+        ):
+            build_engine(options)
+
+        requests = install.call_args.args[1]
+        assert "griptape-nodes-engine==0.102.1" in requests
+        assert "httpx>=0.28.0,<1.0.0" in requests
+        assert not any("profiling" in request or "austin" in request for request in requests)
+        assert (tmp_path / "store" / "griptape_nodes_engine" / "0.102.1" / "python" / "griptape_nodes").is_dir()
+        assert validate.call_args.args[2] == "0.102.1"
 
     def test_missing_bindings_stop_before_building_even_with_yes(
         self, tmp_path: Path, fake_tools: FakeRezTools

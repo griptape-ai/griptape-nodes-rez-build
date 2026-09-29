@@ -35,7 +35,8 @@ uv comes with the tool. uv settings in your environment (`UV_INDEX_URL`, `UV_FIN
 It has four commands:
 
 ```
-griptape-nodes-rez build-engine  --engine-repo PATH --local-packages-path PATH [--no-editor] [--app-version V] [--rebuild] [--yes]
+griptape-nodes-rez build-engine  --local-packages-path PATH [--engine-version V | --engine-repo PATH]
+                                 [--no-editor] [--app-version V] [--rebuild] [--yes]
 griptape-nodes-rez build-library (--git-url URL [--branch REF] | --local-path PATH) --local-packages-path PATH
                                  [--torch-backend B ...] [--rebuild] [--yes]
 griptape-nodes-rez write-launch  --tools PLATFORM=PATH ... --library FAMILY[-VERSION] ... --local-packages-path PATH
@@ -101,15 +102,28 @@ platform with `rez bind` if your studio has not. A build stops when they are mis
 
 ```bash
 griptape-nodes-rez build-engine \
-    --engine-repo /path/to/griptape-nodes \
     --local-packages-path /studio/griptape/rez/packages/local
 ```
 
-The engine checkout is read as files, never imported. This writes:
+This builds the published Griptape Nodes engine: the newest release the `gtn` app accepts. To
+build a specific release, add `--engine-version 0.102.1`.
 
-- `griptape_nodes_engine`: the engine. Its `requires` are the version **ranges** from the checkout's
-  `pyproject.toml` (and its `requires-python`), not the versions this build installed, so the engine
-  resolves together with libraries wherever their ranges overlap.
+If your studio changes the engine itself, build your checkout instead:
+
+```bash
+griptape-nodes-rez build-engine \
+    --engine-repo /path/to/griptape-nodes-engine \
+    --local-packages-path /studio/griptape/rez/packages/local
+```
+
+The checkout is read as files, never imported, and its version comes from its `pyproject.toml`.
+Give a changed engine a version no release uses, so it cannot be mistaken for one.
+
+Either way, this writes:
+
+- `griptape_nodes_engine`: the engine. Its `requires` are the version **ranges** the engine
+  declares (and its supported Python versions), not the versions this build installed, so the
+  engine resolves together with libraries wherever their ranges overlap.
 - `griptape_nodes`: the Griptape Nodes app, which provides `gtn`.
 - `griptape_nodes_editor_dist`: the prebuilt editor that `gtn` serves locally. `--no-editor` leaves
   it out. The served editor connects over the local `websocket_direct` transport, which is off by
@@ -118,8 +132,8 @@ The engine checkout is read as files, never imported. This writes:
 - A package for every pip dependency.
 
 The engine package requires the app and the editor at exactly the versions this build installed
-(for example `griptape_nodes-0.99.0`). The app is released against specific engine versions, and
-the build installs it against your checkout instead, so Rez must not swap in a different app later.
+(for example `griptape_nodes-0.99.0`). The app accepts a range of engine versions, and the build
+resolves it against the one engine it packages, so Rez must not swap in a different app later.
 `--app-version` picks the app version; otherwise the newest is used. The app and the engine must
 come from matching releases: a worker from one release may not register with an engine from
 another.
@@ -241,7 +255,7 @@ the engine, then the launch package last. Griptape Nodes does not do this for yo
 - [ ] `griptape-nodes-rez` installed, with Rez's tools (`--rez-tools`) and a Python matching your `python` package
 - [ ] `platform`, `arch`, `os`, and a matching `python` bound on each platform
 - [ ] A local store on a location every platform can reach, with directory file locks on network or cloud drives
-- [ ] Engine (with `gtn` and the editor) built from each platform you support, one at a time
+- [ ] Engine (with `gtn` and the editor) built from each platform you support, one at a time: the published release, or your checkout with `--engine-repo`
 - [ ] Libraries built from each platform, with the torch builds your workstations need ([GPU builds per machine](gpu-builds.md))
 - [ ] Each GPU machine's rezconfig has the `implicit_packages` line `gpu-config` prints ([GPU builds per machine](gpu-builds.md))
 - [ ] Launch package written with the libraries this environment needs ([Choosing environments](choosing-environments.md)); for testing, with `--config-file` pointing at a rezconfig that searches the local store

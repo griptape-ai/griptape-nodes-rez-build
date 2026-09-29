@@ -61,8 +61,21 @@ def main_options(
 
 @app.command("build-engine")
 def build_engine_command(
-    engine_repo: Annotated[str, typer.Option("--engine-repo", help="Root of a griptape-nodes-engine checkout.")],
     local_packages_path: StoreOption,
+    engine_version: Annotated[
+        str | None,
+        typer.Option(
+            "--engine-version",
+            help="Published engine version to build. Default: the newest release the gtn app accepts.",
+        ),
+    ] = None,
+    engine_repo: Annotated[
+        str | None,
+        typer.Option(
+            "--engine-repo",
+            help="Build this griptape-nodes-engine checkout instead of a published release, to package your own changes.",
+        ),
+    ] = None,
     no_editor: Annotated[
         bool, typer.Option("--no-editor", help="Leave out the prebuilt editor (griptape-nodes-editor-dist).")
     ] = False,
@@ -74,11 +87,22 @@ def build_engine_command(
     rez_tools: RezToolsOption = None,
 ) -> None:
     """Build the engine, the gtn app, the editor, and every pip dependency as rez packages."""
+    if engine_repo is not None and engine_version is not None:
+        console.print(
+            "[red]Attempted to build the engine. Failed because --engine-version picks a published release and "
+            "--engine-repo builds a checkout, whose version comes from its pyproject.toml. Pass one of them.[/red]"
+        )
+        raise typer.Exit(1)
     console.print(Panel("[bold cyan]Griptape Nodes engine package[/bold cyan]", expand=False))
-    _run(
-        lambda: build_engine(
+
+    def build() -> None:
+        checkout = None
+        if engine_repo is not None:
+            checkout = admin_path(engine_repo)
+        build_engine(
             EngineBuildOptions(
-                engine_repo=admin_path(engine_repo),
+                engine_repo=checkout,
+                engine_version=engine_version,
                 store=admin_path(local_packages_path),
                 tools=RezTools.locate(rez_tools),
                 editor=not no_editor,
@@ -87,7 +111,8 @@ def build_engine_command(
                 interactive=can_prompt(yes=yes),
             )
         )
-    )
+
+    _run(build)
 
 
 @app.command("build-library")

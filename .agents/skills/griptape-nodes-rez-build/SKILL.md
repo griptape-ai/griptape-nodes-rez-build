@@ -106,7 +106,8 @@ Python package `griptape_nodes_rez_build` (`src/`), command `griptape-nodes-rez`
 its checks use `rez env --paths <store>:<packages_path>`.
 
 ```
-griptape-nodes-rez build-engine  --engine-repo PATH --local-packages-path PATH [--no-editor] [--app-version V] [--rebuild] [--yes]
+griptape-nodes-rez build-engine  --local-packages-path PATH [--engine-version V | --engine-repo PATH]
+                                 [--no-editor] [--app-version V] [--rebuild] [--yes]
 griptape-nodes-rez build-library (--git-url URL [--branch REF] | --local-path PATH) --local-packages-path PATH
                                  [--torch-backend B ...] [--rebuild] [--yes]
 griptape-nodes-rez write-launch  --tools PLATFORM=PATH ... --library FAMILY[-VERSION] ... --local-packages-path PATH
@@ -115,10 +116,14 @@ griptape-nodes-rez write-launch  --tools PLATFORM=PATH ... --library FAMILY[-VER
 griptape-nodes-rez gpu-config    [--local-packages-path PATH ...]
 ```
 
-- **`build-engine`**: `griptape_nodes_engine` with `requires` from the checkout's `pyproject.toml`
-  ranges and `requires-python` (checkout read as files, never imported); `griptape_nodes` (app) and
-  `griptape_nodes_editor_dist` pinned to the versions installed (the app's exact engine requirement
-  is replaced by the checkout); every pip dependency. Existing engine version kept, only this
+- **`build-engine`**: the engine is the published `griptape-nodes-engine` by default (newest the
+  app accepts, chosen by resolving the two together with uv, or `--engine-version`), unpacked with
+  `uv pip install --no-deps --target`; `--engine-repo` builds a checkout instead (read as files,
+  never imported) for studios changing the engine. `griptape_nodes_engine`'s `requires` are the
+  engine's declared ranges (release `Requires-Dist` minus extras, or the checkout's `pyproject.toml`)
+  and `requires-python`; `griptape_nodes` (app) and `griptape_nodes_editor_dist` pinned to the
+  versions installed (the app accepts an engine range; the resolve meets it with the engine being
+  packaged); every pip dependency. Existing engine version kept, only this
   machine's variants added; `--rebuild` replaces. Check: `rez env griptape_nodes_engine==<v>`
   provides engine, app, editor, `gtn`.
 - **`build-library`**: `<family>` = repo or folder name, lowercase, underscores.

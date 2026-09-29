@@ -60,21 +60,27 @@ it is resolved and written (`griptape-nodes-rez --verbose build-engine ...`).
 ### build-engine
 
 ```bash
-griptape-nodes-rez build-engine --engine-repo PATH --local-packages-path PATH \
+griptape-nodes-rez build-engine --local-packages-path PATH [--engine-version V | --engine-repo PATH] \
     [--no-editor] [--app-version V] [--rebuild] [--yes]
 ```
 
-Packages an engine checkout (read as files, never imported) with the `gtn` app and the prebuilt
-editor. The engine package's `requires` are the version ranges from the checkout's
-`pyproject.toml` (and `requires-python`), not the versions this build resolved, so the engine
-resolves together with node libraries wherever their ranges overlap. Reproducibility comes from
-released package sets and `rez env --time`.
+Packages the engine with the `gtn` app and the prebuilt editor. By default the engine is the
+published `griptape-nodes-engine` release: the newest one the app accepts, or `--engine-version`.
+To package your own changes to the engine, pass `--engine-repo` with a checkout instead (read as
+files, never imported); its version comes from its `pyproject.toml`.
 
-The app and editor are pinned to the versions this build installed (`griptape_nodes-0.99.0`).
-The app is released against specific engine versions and declares an exact engine requirement;
-the build replaces that with the checkout (`griptape-nodes-engine @ file://...`), so rez must not
-swap in a different app later.
+The engine package's `requires` are the version ranges the engine declares (the release's
+metadata, or the checkout's `pyproject.toml`, with `requires-python`), not the versions this build
+resolved, so the engine resolves together with node libraries wherever their ranges overlap. The
+engine's optional extras are left out. Reproducibility comes from released package sets and
+`rez env --time`.
 
+The app and editor are pinned to the versions this build installed (`griptape_nodes-0.99.0`). The
+app accepts a range of engine versions, and the build resolves it against the one engine it
+packages, so rez must not swap in a different app later.
+
+- `--engine-version V` builds that published engine release. It cannot be combined with
+  `--engine-repo`.
 - `--no-editor` leaves out `griptape_nodes_editor_dist`.
 - `--app-version V` picks the app version; otherwise uv picks the newest.
 - An existing engine package of the same version is kept, and the build only adds what this

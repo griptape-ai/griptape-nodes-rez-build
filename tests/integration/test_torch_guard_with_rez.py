@@ -45,8 +45,11 @@ def rez_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             monkeypatch.delenv(name)
     monkeypatch.setenv("REZ_CONFIG_FILE", str(config))
     monkeypatch.setenv("PATH", str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", ""))
-    for binding in ("platform", "arch", "os", "python"):
-        result = tools.run(["rez-bind", binding], timeout=120)
+    # rez-bind python binds the first `python` on PATH unless told otherwise, which on a CI runner
+    # can be the system Python rather than this one; the variants below are built for this one.
+    bindings = [["platform"], ["arch"], ["os"], ["python", "--exe", str(Path(sys.executable).resolve())]]
+    for binding in bindings:
+        result = tools.run(["rez-bind", *binding], timeout=120)
         assert result.succeeded, result.failure_summary()
 
     info = WheelInfo(

@@ -22,7 +22,7 @@ The engine contains no rez code. It reads what these packages set: `GTN_LIBRARY_
 
 ## Requirements
 
-- rez's tools (`rez`, `rez-env`, `rez-config`, `rez-search`). Pass the folder with
+- rez 3 (tested with 3.4.0), for its tools (`rez`, `rez-env`, `rez-config`, `rez-search`). Pass the folder with
   `--rez-tools`, set `GRIPTAPE_NODES_REZ_TOOLS`, or put `rez-env` on `PATH`. In a standard rez
   install the folder is `<prefix>/bin/rez`.
 - The `platform`, `arch`, `os`, and `python` packages `rez-bind` creates, for the Python version

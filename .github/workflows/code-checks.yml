@@ -1,0 +1,31 @@
+name: Code Checks
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  merge_group:
+    types: [checks_requested]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Init environment
+        uses: ./.github/actions/init-environment
+      - name: Format, lint, type check, and spell check
+        run: make check

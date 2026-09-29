@@ -35,8 +35,11 @@ converted (``===``, a malformed specifier, specifiers that exclude every version
 its author ruled out.
 
 Versions keep pip's normalised spelling (``2.0.0rc1``), because that is how the build names the
-version folders it writes. One inexactness remains, shared with rez-pip: rez orders a
-pre-release after its release (``2.0.0rc1`` is newer than ``2.0.0``).
+version folders it writes. Rez orders a pre-release or dev release after its release
+(``2.0.0rc1`` is newer than ``2.0.0``), so a bound on one is moved to the release:
+``>=0.8.0rc0`` is ``0.8+`` (admits ``0.8.0``), ``<0.8.0rc0`` is ``<0.8`` (excludes ``0.8.0``). What
+stays inexact: ``>=0.8.0rc1`` also admits ``0.8.0rc0``. Post releases (``1.0.post1``) sort after
+their release in both, and need no change.
 """
 
 from __future__ import annotations
@@ -150,7 +153,7 @@ def rez_range(specifier: str) -> str:
     return "|".join(interval.to_rez() for interval in intervals)
 
 
-def _spec_intervals(spec: Specifier, specifier_text: str) -> list[VersionInterval]:  # noqa: PLR0911
+def _spec_intervals(spec: Specifier, specifier_text: str) -> list[VersionInterval]:  # noqa: C901, PLR0911
     """One specifier (``>=1.2``) as the rez intervals it allows."""
     operator = spec.operator
     wildcard = spec.version.endswith(".*")
@@ -159,7 +162,11 @@ def _spec_intervals(spec: Specifier, specifier_text: str) -> list[VersionInterva
     # (1, 1.0, 1.0.0) falls on the same side of the bound in rez.
     this = RezVersion(_shortest_spelling(version))
     adjacent = RezVersion(_just_above(version))
-
+    # Rez puts 0.8.0rc0 (and a1, b1, dev1) after 0.8.0, pip puts it before. For a pre-release or
+    # dev release, bounds that separate it from its release use the release itself.
+    prerelease_intervals = _prerelease_intervals(operator, version, this=this, adjacent=adjacent)
+    if prerelease_intervals is not None:
+        return prerelease_intervals
     if operator == "==" and wildcard:
         return [VersionInterval(lower=this, upper=RezVersion(_next_release(version)))]
     if operator == "==":
@@ -185,6 +192,30 @@ def _spec_intervals(spec: Specifier, specifier_text: str) -> list[VersionInterva
     raise SpecifierConversionError(msg)
 
 
+def _prerelease_intervals(
+    operator: str, version: str, *, this: RezVersion, adjacent: RezVersion
+) -> list[VersionInterval] | None:
+    """Intervals for a bound on a pre-release or dev release (``>=0.8.0rc0``), or None when the usual ones apply.
+
+    ``>=0.8.0rc0`` and ``>0.8.0rc0`` start at the release (``0.8+``), so ``0.8.0`` is admitted.
+    ``<0.8.0rc0`` ends below it (``<0.8``), so ``0.8.0`` is excluded; ``<=`` adds the pre-release
+    itself. Pre-releases of the same release that pip would order below the bound (``rc0`` for
+    ``>=0.8.0rc1``) are admitted too: rez cannot tell them apart from the release's other spellings.
+    """
+    if not _is_before_its_release(version):
+        return None
+    release = RezVersion(_shortest_spelling(_release_of(version)))
+    if operator == "~=":
+        return [VersionInterval(lower=release, upper=RezVersion(_next_release(version, trim=1)))]
+    if operator in (">=", ">"):
+        return [VersionInterval(lower=release, upper=None)]
+    if operator == "<":
+        return [VersionInterval(lower=None, upper=release)]
+    if operator == "<=":
+        return [VersionInterval(lower=None, upper=release), VersionInterval(lower=this, upper=adjacent)]
+    return None
+
+
 def _intersect_all(left: list[VersionInterval], right: list[VersionInterval]) -> list[VersionInterval]:
     """The intersection of two unions of intervals, sorted and with overlaps merged."""
     pieces = [a.intersect(b) for a in left for b in right]
@@ -208,6 +239,19 @@ def _normalise(version: str, specifier_text: str) -> str:
         msg = f"'{specifier_text}' names '{version}', which is not a valid version"
         raise SpecifierConversionError(msg) from exc
     return str(parsed).split("+", 1)[0]
+
+
+def _is_before_its_release(version: str) -> bool:
+    """Whether pip orders *version* before its release: ``1.0rc1`` and ``1.0.dev1``, not ``1.0.post1``."""
+    parsed = Version(version)
+    if parsed.pre is not None:
+        return True
+    return parsed.dev is not None and parsed.post is None
+
+
+def _release_of(version: str) -> str:
+    """The release a version belongs to: ``0.8.0rc0`` -> ``0.8.0``."""
+    return ".".join(str(part) for part in Version(version).release)
 
 
 def _shortest_spelling(version: str) -> str:

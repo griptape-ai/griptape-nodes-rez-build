@@ -66,7 +66,7 @@ class TestCombined:
             ("==2.0+cu128", "2+<2.0.0.1"),
             ("==1.2.*,!=1.2.3", "1.2+<1.2.3|1.2.3.1+<1.3"),
             (">=0.9,<1.0.0", "0.9+<1"),
-            (">=2.0.0rc1", "2.0.0rc1+"),
+            (">=2.0.0rc1", "2+"),
             ("~=1.4.2", "1.4.2+<1.5"),
         ],
     )
@@ -82,6 +82,41 @@ class TestTrailingZeros:
         [(">=1.0", "1+"), ("<1.0.0", "<1"), ("==1.0.0", "1+<1.0.0.1"), ("<=1.0", "<1.0.0.1"), ("!=1.0", "<1|1.0.0.1+")],
     )
     def test_every_spelling_of_the_bound_lands_on_the_same_side(self, specifier: str, expected: str) -> None:
+        assert rez_range(specifier) == expected
+
+
+class TestPreReleaseBounds:
+    """Rez orders 0.8.0rc0 after 0.8.0; pip before. Bounds on a pre-release move to its release."""
+
+    def test_at_least_a_release_candidate_admits_the_release(self) -> None:
+        # The diffusers manifest's "safetensors>=0.8.0rc0" must resolve to an installed 0.8.0.
+        assert rez_requirement("safetensors", ">=0.8.0rc0") == "safetensors-0.8+"
+        assert not RezVersion("0.8.0") < RezVersion("0.8")
+        assert RezVersion("0.8.0") < RezVersion("0.8.0rc0")  # why the old '0.8.0rc0+' excluded 0.8.0
+
+    @pytest.mark.parametrize(
+        ("specifier", "expected"),
+        [
+            (">=0.8.0rc0", "0.8+"),
+            (">0.8.0rc0", "0.8+"),
+            (">=0.8.0a1", "0.8+"),
+            (">=0.8.0b2", "0.8+"),
+            (">=0.8.0.dev1", "0.8+"),
+            (">=0.8.dev0", "0.8+"),
+            ("~=0.8.0rc0", "0.8+<0.9"),
+            ("<0.8.0rc0", "<0.8"),
+            ("<0.8.0.dev1", "<0.8"),
+            ("<=0.8.0rc0", "<0.8|0.8.0rc0+<0.8.0rc0.1"),
+            ("==0.8.0rc0", "0.8.0rc0+<0.8.0rc0.1"),
+            ("!=0.8.0rc0", "<0.8.0rc0|0.8.0rc0.1+"),
+            (">=0.7,<0.8.0rc0", "0.7+<0.8"),
+            (">=0.8rc1,<0.9", "0.8+<0.9"),
+            # Post releases sort after their release in rez too.
+            (">=0.8.0.post1", "0.8.0.post1+"),
+            ("<0.8.0.post1", "<0.8.0.post1"),
+        ],
+    )
+    def test_bounds(self, specifier: str, expected: str) -> None:
         assert rez_range(specifier) == expected
 
 

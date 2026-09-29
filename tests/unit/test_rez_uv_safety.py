@@ -273,5 +273,7 @@ class TestWrittenForRollBack:
 
         assert WrittenPackage(version_dir=tmp_path / "demo" / "1.0", variant=None) in report.written
         linux = ["platform-linux", "arch-x86_64", "python-3.12"]
-        assert WrittenPackage(version_dir=shared_dir, variant=linux) in report.written
+        previous = "name = 'shared'\nvariants = [" + repr(other) + "]\n"
+        # The package.py another build wrote is kept, so a roll back can put it back exactly.
+        assert WrittenPackage(version_dir=shared_dir, variant=linux, previous_package_file=previous) in report.written
         assert all(item.version_dir != six_dir for item in report.written)

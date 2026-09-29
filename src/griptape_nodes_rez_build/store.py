@@ -35,6 +35,8 @@ class WrittenPackage:
 
     version_dir: Path
     variant: list[str] | None
+    # The version's package.py before this build added the variant, restored on roll back.
+    previous_package_file: str | None = None
 
     @property
     def label(self) -> str:
@@ -48,8 +50,9 @@ def roll_back(written: list[WrittenPackage]) -> list[str]:
     """Remove what one build wrote, newest first; returns what was removed.
 
     Variants another build added, and versions another build created, are left alone: a variant
-    this build added is dropped from its version's ``package.py`` (the version itself goes only
-    when no variant is left) and its folder is removed.
+    this build added is removed and its version's ``package.py`` is put back as it was before the
+    build (or, when that is not known, the variant is dropped from it; the version goes only when
+    no variant is left).
     """
     removed: list[str] = []
     for item in reversed(written):
@@ -59,7 +62,12 @@ def roll_back(written: list[WrittenPackage]) -> list[str]:
             shutil.rmtree(item.version_dir, ignore_errors=True)
             removed.append(item.label)
             continue
-        _remove_variant(item.version_dir, item.variant)
+        if item.previous_package_file is not None:
+            write_text_atomic(item.version_dir / PACKAGE_FILE, item.previous_package_file)
+            shutil.rmtree(item.version_dir.joinpath(*item.variant), ignore_errors=True)
+        else:
+            _remove_variant(item.version_dir, item.variant)
+        _remove_empty_parents(item.version_dir.joinpath(*item.variant).parent, stop=item.version_dir)
         removed.append(item.label)
     for family_dir in {item.version_dir.parent for item in written}:
         if family_dir.is_dir() and not any(family_dir.iterdir()):
@@ -178,3 +186,11 @@ def _remove_variant(version_dir: Path, variant: list[str]) -> None:
         return
     write_text_atomic(package_file, content[: match.start()] + f"variants = {remaining!r}" + content[match.end() :])
     shutil.rmtree(version_dir.joinpath(*variant), ignore_errors=True)
+
+
+def _remove_empty_parents(folder: Path, *, stop: Path) -> None:
+    """Remove *folder* and its parents up to (not including) *stop* while they are empty."""
+    current = folder
+    while current != stop and current.is_dir() and not any(current.iterdir()):
+        current.rmdir()
+        current = current.parent

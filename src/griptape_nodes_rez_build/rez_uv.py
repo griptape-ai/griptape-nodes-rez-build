@@ -1092,6 +1092,10 @@ def write_rez_package(  # noqa: PLR0913
     variant = build_variant(is_pure=info.is_pure_python, python_version=python_version, backend=backend, extras=extras)
     logger.debug("[Rez][uv]   family=%s  variant=%s", family_name, variant)
 
+    package_file = version_dir / PACKAGE_FILE
+    previous_package_file = None
+    if package_file.is_file():
+        previous_package_file = package_file.read_text(encoding="utf-8")
     # Payload first, staged next to the package and renamed into place; package.py last, so
     # the variant is listed only once its files are complete.
     staged = staging_dir(packages_dir / family_name, clean_version)
@@ -1108,7 +1112,7 @@ def write_rez_package(  # noqa: PLR0913
         variant=variant,
         platform_requires=platform_requires,
     )
-    return WrittenPackage(version_dir=version_dir, variant=variant)
+    return WrittenPackage(version_dir=version_dir, variant=variant, previous_package_file=previous_package_file)
 
 
 def _install_one(  # noqa: PLR0913

@@ -5,12 +5,13 @@ from __future__ import annotations
 import ast
 import json
 import os
-from typing import TYPE_CHECKING
+import subprocess
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from griptape_nodes_rez_build import library
+from griptape_nodes_rez_build import library, rez_uv
 from griptape_nodes_rez_build.common import PackageRequires
 from griptape_nodes_rez_build.errors import BuildError, ResolveError
 from griptape_nodes_rez_build.library import (
@@ -28,9 +29,6 @@ from griptape_nodes_rez_build.rez_uv import InstallReport, ResolvedPackage
 from griptape_nodes_rez_build.store import WrittenPackage
 from tests.unit.conftest import FakeRezTools, failed, ok
 from tests.unit.rex_fake import run_commands
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 AWKWARD_NAME = 'Rez\'s "Test" Library \\'
 FAMILY = LibraryFamily(family="rez_test", source="folder 'rez-test'", folder="rez-test")
@@ -351,3 +349,78 @@ class TestBuildLibraryRollBack:
         assert not (store / "rez_test_edit" / "0.1.0").exists()
         assert not (store / "rez_test" / "0.1.0").exists()
         assert not new_dependency.exists()
+
+
+def _snapshot(store: Path) -> dict[str, str]:
+    """Every file under *store* (hidden staging folders included) with its text."""
+    return {
+        str(path.relative_to(store)): path.read_text(encoding="utf-8", errors="replace")
+        for path in sorted(store.rglob("*"))
+        if path.is_file()
+    }
+
+
+class TestFailedCheckLeavesTheStoreAsItWas:
+    def test_store_is_restored_and_another_platforms_variant_survives(
+        self, tmp_path: Path, fake_tools: FakeRezTools
+    ) -> None:
+        library_dir = tmp_path / "rez-test"
+        library_dir.mkdir()
+        (library_dir / "griptape_nodes_library.json").write_text(
+            json.dumps(
+                {
+                    "name": "Rez Test Library",
+                    "metadata": {
+                        "library_version": "0.1.0",
+                        "dependencies": {"pip_dependencies": ["shared>=2", "fresh>=1"]},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        store = tmp_path / "store"
+        # shared-2.0 was built on macOS by another run: this Linux run adds its own variant to it.
+        osx = ["platform-osx", "arch-arm64", "python-3.12"]
+        shared_dir = store / "shared" / "2.0"
+        (shared_dir / Path(*osx) / "python").mkdir(parents=True)
+        (shared_dir / Path(*osx) / "python" / "shared.py").write_text("built = 'osx'\n", encoding="utf-8")
+        (shared_dir / "package.py").write_text(
+            f"name = 'shared'\n\nversion = '2.0'\n\nvariants = [{osx!r}]\n", encoding="utf-8"
+        )
+        before = _snapshot(store)
+
+        real_run = subprocess.run
+
+        def uv(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            if cmd[0] != "uv":
+                return real_run(cmd, **kwargs)  # type: ignore[call-overload]  # git, for naming the library
+            if "compile" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout="fresh==1.0\nshared==2.0\n", stderr="")
+            target = Path(cmd[cmd.index("--target") + 1])
+            name, version = cmd[cmd.index("--target") + 2].split("==")
+            dist_info = target / f"{name}-{version}.dist-info"
+            dist_info.mkdir(parents=True)
+            (dist_info / "METADATA").write_text(
+                f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n", encoding="utf-8"
+            )
+            tag = "cp312-cp312-linux_x86_64" if name == "shared" else "py3-none-any"
+            (dist_info / "WHEEL").write_text(f"Wheel-Version: 1.0\nTag: {tag}\n", encoding="utf-8")
+            (target / f"{name}.py").write_text("built = 'linux'\n", encoding="utf-8")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        fake_tools.env_results = [failed("package not found: something")]
+        with (
+            patch.object(rez_uv.subprocess, "run", side_effect=uv),
+            patch.object(rez_uv, "_current_rez_platform", return_value=("linux", "x86_64")),
+            patch.object(rez_uv, "find_uv_bin", return_value="uv"),
+            pytest.raises(BuildError) as raised,
+        ):
+            library.build_library_from_dir(library_dir, _options(tmp_path, fake_tools))
+
+        message = str(raised.value)
+        assert "fresh-1.0" in message
+        assert "shared-2.0 variant" in message
+        assert "rez_test_edit-0.1.0" in message
+        # The run wrote fresh, a Linux variant of shared, and both library packages; all gone.
+        assert _snapshot(store) == before
+        assert sorted(path.name for path in store.iterdir()) == ["shared"]

@@ -85,7 +85,7 @@ def _with_implicit(store: Path, backend: str) -> None:
 class TestTorchGuard:
     @pytest.mark.usefixtures("rez_store")
     def test_without_implicit_the_environment_stops_with_the_fix(self) -> None:
-        result = _tools().env(["torch_nodes"], ["python", "-c", CHECK])
+        result = _tools().run_python(["torch_nodes"], CHECK)
 
         assert not result.succeeded
         output = result.stderr + result.stdout
@@ -96,26 +96,26 @@ class TestTorchGuard:
     def test_implicit_selects_its_build(self, rez_store: Path, backend: str) -> None:
         _with_implicit(rez_store, backend)
 
-        result = _tools().env(["torch_nodes"], ["python", "-c", CHECK])
+        result = _tools().run_python(["torch_nodes"], CHECK)
 
         assert result.succeeded, result.failure_summary()
         assert "torch-2.7.0" in result.stdout
-        root = _tools().env(["torch_nodes"], ["python", "-c", "import os; print(os.environ['REZ_TORCH_ROOT'])"])
+        root = _tools().run_python(["torch_nodes"], "import os; print(os.environ['REZ_TORCH_ROOT'])")
         assert root.stdout.strip().endswith(f".torch_backend-{backend}")
 
     @pytest.mark.usefixtures("rez_store")
     def test_explicit_request_also_satisfies_the_guard(self) -> None:
-        result = _tools().env(["torch_nodes", ".torch_backend-cu128"], ["python", "-c", CHECK])
+        result = _tools().run_python(["torch_nodes", ".torch_backend-cu128"], CHECK)
         assert result.succeeded, result.failure_summary()
 
     def test_implicit_for_a_build_that_is_not_in_the_store_fails_to_resolve(self, rez_store: Path) -> None:
         _with_implicit(rez_store, "cu118")
-        result = _tools().env(["torch_nodes"], ["python", "-c", CHECK])
+        result = _tools().run_python(["torch_nodes"], CHECK)
         assert not result.succeeded
 
     @pytest.mark.usefixtures("rez_store")
     def test_packages_without_torch_builds_are_unaffected(self) -> None:
-        result = _tools().env([f"python-{PYTHON_VERSION}"], ["python", "-c", "print('ok')"])
+        result = _tools().run_python([f"python-{PYTHON_VERSION}"], "print('ok')")
         assert result.succeeded, result.failure_summary()
 
 

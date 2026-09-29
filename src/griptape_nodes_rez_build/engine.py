@@ -247,7 +247,7 @@ def validate_engine(tools: RezTools, paths: list[Path], version: str, *, store: 
     """Resolve the engine from the store and check the engine, app, editor, and ``gtn`` all come from it."""
     request = f"{ENGINE_FAMILY}=={version}"
     console.print(f"[bold]Checking[/bold] rez env {request} ...")
-    result = tools.env([request], ["python", "-c", _VALIDATE_SCRIPT], paths=paths)
+    result = tools.run_python([request], _VALIDATE_SCRIPT, paths=paths)
     if not result.succeeded:
         msg = f"Attempted to resolve {request} from {store}. Failed because rez reported:\n{result.failure_summary()}"
         raise BuildError(msg)

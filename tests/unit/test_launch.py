@@ -305,7 +305,8 @@ class TestValidateLaunch:
         assert call.extra_env is None
         # The script inside starts the workers itself, with the engine version to fill in.
         assert call.command[-1] == "0.103.0"
-        assert "subprocess.run(command" in call.command[2]
+        assert call.script is not None
+        assert "subprocess.run(command" in call.script
 
     def test_store_rez_does_not_search_is_added_for_the_workers_too(
         self, tmp_path: Path, fake_tools: FakeRezTools

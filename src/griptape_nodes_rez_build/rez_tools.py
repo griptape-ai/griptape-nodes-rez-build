@@ -20,6 +20,8 @@ from griptape_nodes_rez_build.errors import BuildError
 
 # Where to find rez's tools when --rez-tools is not given.
 ENV_REZ_TOOLS = "GRIPTAPE_NODES_REZ_TOOLS"
+# Refused in commands given to rez env (see RezTools.env).
+INLINE_CODE_FLAG = "-c"
 
 _RESOLVE_TIMEOUT_SECONDS = 600
 _QUERY_TIMEOUT_SECONDS = 60
@@ -87,11 +89,37 @@ class RezTools:
         paths: list[Path] | None = None,
         extra_env: dict[str, str] | None = None,
     ) -> RezResult:
-        """``rez env --norc [--paths ...] <request> -- <command>``: resolve and run one command inside."""
+        """``rez env --norc [--paths ...] <request> -- <command>``: resolve and run one command inside.
+
+        Python code is never passed inline (``python -c``): on Windows rez runs the command through a
+        shell that strips double quotes. Use ``run_python``, which runs it from a file.
+        """
+        if INLINE_CODE_FLAG in command:
+            msg = "internal error: pass Python code to rez env with run_python, not python -c"
+            raise ValueError(msg)
         args = ["env", "--norc"]
         if paths is not None:
             args += ["--paths", os.pathsep.join(str(path) for path in paths)]
         return self.run(["rez", *args, *request, "--", *command], timeout=_RESOLVE_TIMEOUT_SECONDS, extra_env=extra_env)
+
+    def run_python(
+        self,
+        request: list[str],
+        script: str,
+        args: list[str] | None = None,
+        *,
+        paths: list[Path] | None = None,
+        extra_env: dict[str, str] | None = None,
+    ) -> RezResult:
+        """Run *script* with the environment's ``python`` inside ``rez env <request>``.
+
+        The script is written to a temporary file and run as ``python <file> <args>``, so nothing in
+        it depends on how a shell quotes or splits the command line. The file is removed afterwards.
+        """
+        with tempfile.TemporaryDirectory(prefix="griptape_rez_check_") as temporary:
+            script_file = Path(temporary) / "check.py"
+            script_file.write_text(script, encoding="utf-8")
+            return self.env(request, ["python", str(script_file), *(args or [])], paths=paths, extra_env=extra_env)
 
     def resolves(self, request: list[str], *, paths: list[Path]) -> RezResult:
         """Resolve *request* without running anything in it (``rez env --output``)."""

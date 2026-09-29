@@ -358,8 +358,8 @@ def validate_library(  # noqa: PLR0913
     backend_requests = [torch_backend_request(torch_backends[0])] if torch_backends else []
     for request in (f"{family.edit_family}=={version}", f"{family.family}=={version}"):
         console.print(f"[bold]Checking[/bold] rez env {request} ...")
-        result = tools.env(
-            [request, f"python-{python_version()}", *backend_requests], ["python", "-c", _VALIDATE_SCRIPT], paths=paths
+        result = tools.run_python(
+            [request, f"python-{python_version()}", *backend_requests], _VALIDATE_SCRIPT, paths=paths
         )
         if not result.succeeded:
             msg = f"Attempted to resolve {request}. Failed because rez reported:\n{result.failure_summary()}"

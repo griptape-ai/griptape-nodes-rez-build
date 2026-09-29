@@ -20,6 +20,8 @@ class EnvCall:
     command: list[str]
     paths: list[Path] | None
     extra_env: dict[str, str] | None = None
+    # The Python file the command runs, read while it still exists (run_python removes it).
+    script: str | None = None
 
 
 @dataclass
@@ -46,7 +48,12 @@ class FakeRezTools(RezTools):
         paths: list[Path] | None = None,
         extra_env: dict[str, str] | None = None,
     ) -> RezResult:
-        self.env_calls.append(EnvCall(request=request, command=command, paths=paths, extra_env=extra_env))
+        script = None
+        if len(command) > 1 and command[1].endswith(".py") and Path(command[1]).is_file():
+            script = Path(command[1]).read_text(encoding="utf-8")
+        self.env_calls.append(
+            EnvCall(request=request, command=command, paths=paths, extra_env=extra_env, script=script)
+        )
         return self.env_results.pop(0)
 
     def searches(self, store: Path) -> bool:

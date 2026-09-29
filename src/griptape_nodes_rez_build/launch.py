@@ -67,7 +67,7 @@ _PLATFORM_KEYS = {"darwin": "osx", "win32": "windows"}
 
 # Run inside the launch environment: what the engine will see.
 _VALIDATE_SCRIPT = """\
-import json, os, subprocess, sys
+import json, os, subprocess, sys, tempfile
 import griptape_nodes, griptape_nodes_app
 names = ("GTN_LIBRARY_PATHS", "GTN_LIBRARY_WORKER_REQUESTS", "GTN_CONFIG_LIBRARY__DEPENDENCY_SOURCE", "GTN_CONFIG_WORKER__COMMAND_PREFIX", "GTN_CONFIG_LIBRARY__ENVIRONMENT_ALLOWS_SANDBOX")
 found = {name: os.environ.get(name, "") for name in names}
@@ -75,6 +75,11 @@ found["griptape_nodes"] = griptape_nodes.__file__
 found["griptape_nodes_app"] = griptape_nodes_app.__file__
 # Start each worker's resolve the way the engine does: the prefix, filled, before this interpreter.
 prefix = json.loads(found["GTN_CONFIG_WORKER__COMMAND_PREFIX"] or "[]")
+# The probe runs from a file: on Windows rez passes the command through a shell that strips quotes.
+probe_dir = tempfile.mkdtemp(prefix="griptape_rez_worker_")
+probe = os.path.join(probe_dir, "worker_probe.py")
+with open(probe, "w", encoding="utf-8") as handle:
+    handle.write("import griptape_nodes, griptape_nodes_app\\n")
 workers = []
 for entry in [e for e in found["GTN_LIBRARY_WORKER_REQUESTS"].split(os.pathsep) if e]:
     name, _, request = entry.partition("=")
@@ -84,10 +89,12 @@ for entry in [e for e in found["GTN_LIBRARY_WORKER_REQUESTS"].split(os.pathsep) 
             command.extend(request.split())
         else:
             command.append(word.replace("{engine_version}", sys.argv[1]).replace("{library_request}", request))
-    command += [sys.executable, "-c", "import griptape_nodes, griptape_nodes_app"]
+    command += [sys.executable, probe]
     done = subprocess.run(command, capture_output=True, text=True)
     output = (done.stderr or done.stdout).strip().splitlines()[-8:]
-    workers.append({"name": name, "command": command[: len(command) - 3], "returncode": done.returncode, "output": "\\n".join(output)})
+    workers.append({"name": name, "command": command[: len(command) - 2], "returncode": done.returncode, "output": "\\n".join(output)})
+os.remove(probe)
+os.rmdir(probe_dir)
 found["workers"] = workers
 print(json.dumps(found))
 """
@@ -321,7 +328,7 @@ def validate_launch(tools: RezTools, package: LaunchPackage, *, store: Path) -> 
     if not tools.searches(store):
         extra_env = {"REZ_PACKAGES_PATH": os.pathsep.join(str(path) for path in paths)}
         console.print(f"  {store} is not on rez's search path; the check adds it with REZ_PACKAGES_PATH.")
-    result = tools.env([request], ["python", "-c", _VALIDATE_SCRIPT, package.engine_version], extra_env=extra_env)
+    result = tools.run_python([request], _VALIDATE_SCRIPT, [package.engine_version], extra_env=extra_env)
     if not result.succeeded:
         msg = f"Attempted to resolve {request}. Failed because rez reported:\n{result.failure_summary()}"
         msg += _conflict_report(tools, package, paths=paths)

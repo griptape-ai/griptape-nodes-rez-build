@@ -34,6 +34,10 @@ check/spell:
 test/unit: ## Run unit tests.
 	@uv run pytest -n auto tests/unit
 
+.PHONY: test/integration
+test/integration: ## Run tests against real rez (set GRIPTAPE_NODES_REZ_TOOLS).
+	@uv run pytest tests/integration
+
 .PHONY: help
 help: ## Show this help.
 	@grep -E '^[a-zA-Z_/-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "%-20s %s\n", $$1, $$2}'

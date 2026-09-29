@@ -579,13 +579,8 @@ def expand_extras(
             if key in followed:
                 continue
             followed.add(key)
-            requires_dist = requires_dist_of(requirement.pip_name)
+            requires_dist = _requires_dist_for_extra(requirement, extra, requires_dist_of)
             if requires_dist is None:
-                logger.warning(
-                    "[Rez][uv] could not read %s's metadata -- what its '%s' extra adds is not required",
-                    requirement.pip_name,
-                    extra,
-                )
                 continue
             for spec in requires_dist:
                 dependency = parse_requirement(spec)
@@ -602,6 +597,30 @@ def expand_extras(
                 listed.add(name)
                 result.append(dependency)
     return result
+
+
+def _requires_dist_for_extra(
+    requirement: ParsedRequirement, extra: str, requires_dist_of: Callable[[str], list[str] | None]
+) -> list[str] | None:
+    """The Requires-Dist of the package *requirement* names, or None (logged) when it cannot be read."""
+    requires_dist = requires_dist_of(requirement.pip_name)
+    if requires_dist is not None:
+        return requires_dist
+    if not requirement.applies():
+        # Needed on another platform only (cuda-toolkit[...] on Linux, built on macOS), so this
+        # machine's resolve never installed it; that platform's build adds what the extra brings.
+        logger.debug(
+            "[Rez][uv] %s is not installed on this platform -- its '%s' extra is left to other platforms",
+            requirement.pip_name,
+            extra,
+        )
+        return None
+    logger.warning(
+        "[Rez][uv] could not read %s's metadata -- what its '%s' extra adds is not required",
+        requirement.pip_name,
+        extra,
+    )
+    return None
 
 
 def store_requires_dist_reader(

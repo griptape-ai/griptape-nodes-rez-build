@@ -516,6 +516,14 @@ class TestExpandExtras:
         assert expand_extras([requested], _requires_dist_of) == [requested]
         mock_logger.warning.assert_called_once()
 
+    def test_other_platforms_requirement_without_metadata_is_not_a_warning(self, mock_logger: MagicMock) -> None:
+        other_platform = "darwin" if sys.platform == "win32" else "win32"
+        requested = parse_requirement(f"cuda-toolkit[nvrtc]==13.0; sys_platform == '{other_platform}'")
+        assert requested is not None
+        assert expand_extras([requested], _requires_dist_of) == [requested]
+        mock_logger.warning.assert_not_called()
+        mock_logger.debug.assert_called_once()
+
     def test_wheel_requires_includes_extras(self) -> None:
         requires = wheel_requires(["pydantic-ai-slim[mcp]>=2.29"], _requires_dist_of)
         assert "fastmcp_slim-4+" in requires.common

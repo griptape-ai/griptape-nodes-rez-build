@@ -26,12 +26,26 @@ CHECK = "import os; print(os.environ['REZ_USED_RESOLVE'])"
 
 @functools.cache
 def _rez_python() -> Path:
-    """The interpreter rez's own tools run on, from the rez-env script's first line.
+    """The real interpreter behind the one rez's own tools run on.
 
     rez-bind python links the interpreter it is given with --exe but copies the standard library
     of the interpreter rez runs on (rez 3.4.0), so binding any other Python mixes two standard
-    libraries ("SRE module mismatch"). The tests bind this one and build for its version.
+    libraries ("SRE module mismatch"). A pip or uv install runs rez from a virtual environment,
+    whose python is a launcher that only works from inside that environment (on Windows it runs
+    nothing from a linked copy), so the base interpreter behind it is bound: its standard library
+    is the one rez copies either way.
     """
+    completed = subprocess.run(  # noqa: S603
+        [str(_rez_launcher_python()), "-c", "import sys; print(getattr(sys, '_base_executable', sys.executable))"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return Path(completed.stdout.strip())
+
+
+def _rez_launcher_python() -> Path:
+    """The interpreter rez's tools start with: rez-env's #! line, or the python next to the tools."""
     folder = _tools().folder
     script = folder / "rez-env"
     if script.is_file():

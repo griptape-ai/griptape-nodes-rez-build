@@ -8,8 +8,10 @@ real ones, with this machine's platform so rez can resolve them here.
 
 from __future__ import annotations
 
+import functools
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -19,8 +21,33 @@ from griptape_nodes_rez_build.errors import BuildError
 from griptape_nodes_rez_build.rez_tools import ENV_REZ_TOOLS, RezTools
 from griptape_nodes_rez_build.rez_uv import WheelInfo, _write_package_py, build_variant
 
-PYTHON_VERSION = f"{sys.version_info.major}.{sys.version_info.minor}"
 CHECK = "import os; print(os.environ['REZ_USED_RESOLVE'])"
+
+
+@functools.cache
+def _rez_python() -> Path:
+    """The interpreter rez's own tools run on, from the rez-env script's first line.
+
+    rez-bind python links the interpreter it is given with --exe but copies the standard library
+    of the interpreter rez runs on (rez 3.4.0), so binding any other Python mixes two standard
+    libraries ("SRE module mismatch"). The tests bind this one and build for its version.
+    """
+    first_line = (_tools().folder / "rez-env").read_text(encoding="utf-8").splitlines()[0]
+    if not first_line.startswith("#!"):
+        pytest.skip("cannot tell which Python rez runs on: rez-env has no #! line")
+    return Path(first_line[2:].strip())
+
+
+@functools.cache
+def _python_version() -> str:
+    """Major and minor version of the Python rez runs on, which the bound python package has."""
+    result = subprocess.run(  # noqa: S603
+        [str(_rez_python()), "-c", "import sys; print('%d.%d' % sys.version_info[:2])"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
 
 
 def _tools() -> RezTools:
@@ -44,10 +71,9 @@ def rez_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         if name.startswith("REZ_"):
             monkeypatch.delenv(name)
     monkeypatch.setenv("REZ_CONFIG_FILE", str(config))
-    monkeypatch.setenv("PATH", str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", ""))
-    # rez-bind python binds the first `python` on PATH unless told otherwise, which on a CI runner
-    # can be the system Python rather than this one; the variants below are built for this one.
-    bindings = [["platform"], ["arch"], ["os"], ["python", "--exe", str(Path(sys.executable).resolve())]]
+    # Without --exe, rez-bind python binds the first `python` on PATH, which on a CI runner can be
+    # the system Python. The one rez runs on is the only one it binds consistently (_rez_python).
+    bindings = [["platform"], ["arch"], ["os"], ["python", "--exe", str(_rez_python())]]
     for binding in bindings:
         result = tools.run(["rez-bind", *binding], timeout=120)
         assert result.succeeded, result.failure_summary()
@@ -64,7 +90,7 @@ def rez_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         requires_dist=[],
     )
     for backend in ("cpu", "cu128"):
-        variant = build_variant(is_pure=False, python_version=PYTHON_VERSION, backend=backend, extras=[])
+        variant = build_variant(is_pure=False, python_version=_python_version(), backend=backend, extras=[])
         (store / "torch" / "2.7.0" / Path(*variant) / "python").mkdir(parents=True)
         _write_package_py(store / "torch" / "2.7.0", "torch", info, [], variant=variant)
 
@@ -81,20 +107,20 @@ def rez_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         platform_tag="any",
         requires_dist=[],
     )
-    (store / "click" / "8.1.0" / f"python-{PYTHON_VERSION}" / "python").mkdir(parents=True)
+    (store / "click" / "8.1.0" / f"python-{_python_version()}" / "python").mkdir(parents=True)
     _write_package_py(
         store / "click" / "8.1.0",
         "click",
         pure,
         [],
-        variant=[f"python-{PYTHON_VERSION}"],
+        variant=[f"python-{_python_version()}"],
         platform_requires={"*": [], "windows-AMD64": ["colorama"]},
     )
 
     library_dir = store / "torch_nodes" / "1.0.0"
     library_dir.mkdir(parents=True)
     (library_dir / "package.py").write_text(
-        f"name = 'torch_nodes'\nversion = '1.0.0'\nrequires = ['torch-2.7+', 'python-{PYTHON_VERSION}']\n",
+        f"name = 'torch_nodes'\nversion = '1.0.0'\nrequires = ['torch-2.7+', 'python-{_python_version()}']\n",
         encoding="utf-8",
     )
     return store
@@ -161,7 +187,7 @@ class TestTorchGuard:
             "        stop('guard fired')\n",
             encoding="utf-8",
         )
-        alone = _tools().run_python(["ephemeral_guard", f"python-{PYTHON_VERSION}"], "print('ran')")
+        alone = _tools().run_python(["ephemeral_guard", f"python-{_python_version()}"], "print('ran')")
         with_late = _tools().run_python(["ephemeral_guard", LATE], "print('ran')")
 
         assert not alone.succeeded
@@ -169,7 +195,7 @@ class TestTorchGuard:
 
     @pytest.mark.usefixtures("rez_store")
     def test_packages_without_torch_builds_are_unaffected(self) -> None:
-        result = _tools().run_python([f"python-{PYTHON_VERSION}"], "print('ok')")
+        result = _tools().run_python([f"python-{_python_version()}"], "print('ok')")
         assert result.succeeded, result.failure_summary()
 
 

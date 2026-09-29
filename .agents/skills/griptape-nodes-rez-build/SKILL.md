@@ -35,7 +35,7 @@ Each `_edit` package's `commands()` put the library on `PYTHONPATH` and publish 
 `library.dependency_source = "environment"` and `worker.command_prefix`. The engine then builds no
 venvs, downloads and updates nothing, makes no Rez calls, and loads only libraries in
 `GTN_LIBRARY_PATHS`. Each library's worker starts as
-`<rez> env --norc griptape_nodes_engine==<v> <family>==<v> -- <absolute python> -m griptape_nodes_app engine ...`,
+`<rez> env --norc griptape_nodes_engine==<v> python-<engine python> <family>==<v> -- <absolute python> -m griptape_nodes_app engine ...`,
 so heavy execution dependencies (torch) stay out of the editor. Nothing in the engine is
 Rez-specific.
 
@@ -86,7 +86,10 @@ and `worker_manager.py`. User-facing description: `docs/guides/managed_environme
   is shown.
 - The prefix goes in front of the absolute interpreter path
   (`sys.executable -m griptape_nodes_app engine ...`). Placeholders: `{library_request}` (a word that
-  is exactly it expands to one word per space-separated part), `{library_name}`, `{engine_version}`.
+  is exactly it expands to one word per space-separated part), `{library_name}`, `{engine_version}`,
+  `{python_version}` (engine's Python, major.minor). The prefix cannot change the interpreter, so the
+  prepared environment must be for the engine's Python; the launch package requests
+  `python-{python_version}` for this.
 - A library with no request entry: `"environment"` mode does not start its worker (nodes stay
   editable; running one says the environment does not say which packages its worker needs); never
   runs unprefixed. `"venv"` mode runs it without the prefix.
@@ -143,7 +146,7 @@ griptape-nodes-rez gpu-config    [--local-packages-path PATH ...]
   writes an engine-only package with a warning. `commands()` per `system.platform` (stop on an
   unconfigured one): `GTN_CONFIG_LIBRARY__DEPENDENCY_SOURCE=environment`,
   `GTN_CONFIG_WORKER__COMMAND_PREFIX=["<tools>/rez", "env", "--norc",
-  "griptape_nodes_engine=={engine_version}", "{library_request}", "--"]` via `literal()`, `--set`
+  "griptape_nodes_engine=={engine_version}", "python-{python_version}", "{library_request}", "--"]` via `literal()`, `--set`
   values on every platform, `--config-file` appended to `REZ_CONFIG_FILE` after the studio's value
   (how a testing setup lets workers find a local store: a rezconfig with
   `packages_path = ModifyList(prepend=[...])`). `--allow-sandbox` (off by default) adds
@@ -205,6 +208,7 @@ torch guard works in all cases. See `docs/choosing-environments.md`.
 | Worker's `rez env` stops asking to run `gpu-config` | The torch guard: no `.torch_backend-*` implicit on this machine. Add the printed line to its rezconfig. |
 | Wrong torch build runs, no guard message | Packages built with the old `ephemerals` guard; rebuild them with `--rebuild`. |
 | Worker cannot find packages from the local store | The testing launch package has no `--config-file` rezconfig that prepends the store (`--testing-store` alone sets nothing). |
+| Worker's `rez env` fails naming `python-3.x` | The library's execution packages do not support the engine's Python; the worker must run on the engine's interpreter. Build the library for that Python, or start the editor on a Python the library supports. |
 | Worker imports a different engine or `mcp` than the editor | The prefix lacks `griptape_nodes_engine=={engine_version}`, so Rez replaced `PYTHONPATH` without the engine. |
 | A local `gtn` runs instead of the environment's | Shell rc files reordered `PATH`; start with `rez env --norc`. cmd/PowerShell ignore `--norc`. |
 | Sandbox refused in environment mode | Expected unless the launch package was written with `--allow-sandbox` (or the setting is set). |

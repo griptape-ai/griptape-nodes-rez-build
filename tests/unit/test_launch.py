@@ -74,6 +74,7 @@ class TestContent:
             "env",
             "--norc",
             "griptape_nodes_engine=={engine_version}",
+            "python-{python_version}",
             "{library_request}",
             "--",
         ]

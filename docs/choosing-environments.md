@@ -74,7 +74,7 @@ Then the engine settings have to come from somewhere else:
   {
     "library": { "dependency_source": "environment", "environment_allows_sandbox": false },
     "worker": {
-      "command_prefix": ["rez", "env", "--norc", "griptape_nodes_engine=={engine_version}", "{library_request}", "--"]
+      "command_prefix": ["rez", "env", "--norc", "griptape_nodes_engine=={engine_version}", "python-{python_version}", "{library_request}", "--"]
     }
   }
   ```

@@ -15,7 +15,9 @@ engine for that environment:
   virtualenv is built). Everything else stays as strict as environment mode is without it.
 - ``GTN_CONFIG_WORKER__COMMAND_PREFIX``: each library's worker starts inside
   ``rez env --norc griptape_nodes_engine==<engine> <library request> --``, with the absolute rez
-  path of that platform. The engine fills ``{engine_version}`` and ``{library_request}``.
+  path of that platform. The engine fills ``{engine_version}``, ``{python_version}``, and
+  ``{library_request}``. The worker runs the engine's own interpreter, so ``python-{python_version}``
+  makes its resolve use the same Python minor version.
 
 Values are chosen per ``system.platform`` when the package resolves, so one package serves every
 platform listed with ``--tools``; on any other platform it stops with a message.
@@ -62,6 +64,7 @@ ENV_ALLOWS_SANDBOX = "GTN_CONFIG_LIBRARY__ENVIRONMENT_ALLOWS_SANDBOX"
 DEPENDENCY_SOURCE_ENVIRONMENT = "environment"
 ENGINE_VERSION_PLACEHOLDER = "{engine_version}"
 LIBRARY_REQUEST_PLACEHOLDER = "{library_request}"
+PYTHON_VERSION_PLACEHOLDER = "{python_version}"
 
 _PLATFORM_KEYS = {"darwin": "osx", "win32": "windows"}
 
@@ -88,7 +91,9 @@ for entry in [e for e in found["GTN_LIBRARY_WORKER_REQUESTS"].split(os.pathsep) 
         if word == "{library_request}":
             command.extend(request.split())
         else:
-            command.append(word.replace("{engine_version}", sys.argv[1]).replace("{library_request}", request))
+            python_version = "%d.%d" % sys.version_info[:2]
+            filled = word.replace("{engine_version}", sys.argv[1]).replace("{python_version}", python_version)
+            command.append(filled.replace("{library_request}", request))
     command += [sys.executable, probe]
     done = subprocess.run(command, capture_output=True, text=True)
     output = (done.stderr or done.stdout).strip().splitlines()[-8:]
@@ -116,6 +121,8 @@ class PlatformSettings:
             "env",
             "--norc",
             f"{ENGINE_FAMILY}=={ENGINE_VERSION_PLACEHOLDER}",
+            # The worker runs the engine's interpreter: resolve its packages for that Python.
+            f"python-{PYTHON_VERSION_PLACEHOLDER}",
             LIBRARY_REQUEST_PLACEHOLDER,
             "--",
         ]

@@ -103,6 +103,7 @@ creates. Placeholders are filled for each worker:
 | `{library_request}` | The library's entry in `GTN_LIBRARY_WORKER_REQUESTS` |
 | `{library_name}` | The library's name, as in its manifest |
 | `{engine_version}` | The running engine's version, such as `0.103.0` |
+| `{python_version}` | The Python the engine runs on, as major.minor, such as `3.12` |
 
 A word that is exactly `{library_request}` becomes one word per space-separated part of the entry,
 so one entry can name several packages. Inside a longer word it is replaced as text.
@@ -110,17 +111,22 @@ so one entry can name several packages. Inside a longer word it is replaced as t
 The launch package sets, per platform:
 
 ```json
-["/studio/rez/bin/rez/rez", "env", "--norc", "griptape_nodes_engine=={engine_version}", "{library_request}", "--"]
+["/studio/rez/bin/rez/rez", "env", "--norc", "griptape_nodes_engine=={engine_version}", "python-{python_version}", "{library_request}", "--"]
 ```
 
 so a worker for `lib_foo` 1.4.2 starts as:
 
 ```bash
-/studio/rez/bin/rez/rez env --norc griptape_nodes_engine==0.103.0 lib_foo==1.4.2 -- /path/to/python -m griptape_nodes_app engine ...
+/studio/rez/bin/rez/rez env --norc griptape_nodes_engine==0.103.0 python-3.12 lib_foo==1.4.2 -- /path/to/python -m griptape_nodes_app engine ...
 ```
 
 The interpreter path is the one the editor's environment runs, which is the `python` package that
 environment resolved.
+
+- **The same Python.** The worker always runs the editor's interpreter, so `python-{python_version}`
+  makes its resolve pick packages for that same Python minor version. A library that cannot run on
+  it fails the worker's `rez env` with Rez's own message, instead of loading packages built for
+  another Python.
 
 - **Exact versions.** The worker resolves the same engine and library versions the editor loaded. A
   newer library in the store does not change a running environment's workers.

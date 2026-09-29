@@ -140,7 +140,7 @@ libraries will load. Its `commands()` pick the settings for `system.platform` an
 not given with `--tools`:
 
 - `GTN_CONFIG_LIBRARY__DEPENDENCY_SOURCE=environment`
-- `GTN_CONFIG_WORKER__COMMAND_PREFIX=["<tools>/rez", "env", "--norc", "griptape_nodes_engine=={engine_version}", "{library_request}", "--"]`,
+- `GTN_CONFIG_WORKER__COMMAND_PREFIX=["<tools>/rez", "env", "--norc", "griptape_nodes_engine=={engine_version}", "python-{python_version}", "{library_request}", "--"]`,
   written with `literal()` so rez leaves the placeholders for the engine to fill
 - `--set` values on every platform (`XDG_CONFIG_HOME`, for example)
 - `--allow-sandbox` (off by default): `GTN_CONFIG_LIBRARY__ENVIRONMENT_ALLOWS_SANDBOX=true` on every

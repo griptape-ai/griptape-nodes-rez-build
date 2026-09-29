@@ -26,7 +26,7 @@ Editor:        library.dependency_source = "environment"
                (other configured libraries are listed as not provided by the environment)
 
 Worker:        worker.command_prefix, filled per library from GTN_LIBRARY_WORKER_REQUESTS:
-               rez env --norc griptape_nodes_engine==0.103.0 lib_foo==1.4.2 -- <python> -m griptape_nodes_app ...
+               rez env --norc griptape_nodes_engine==0.103.0 python-3.12 lib_foo==1.4.2 -- <python> -m griptape_nodes_app ...
 
 Admin:         griptape-nodes-rez build-engine | build-library | write-launch | gpu-config
 ```

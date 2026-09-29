@@ -13,6 +13,9 @@ code; it reads `GTN_LIBRARY_PATHS`, `GTN_LIBRARY_WORKER_REQUESTS`,
 
 Those names are the contract with the engine. A rename has to land in the engine first.
 
+For the full model (engine hooks, packages, torch guard, troubleshooting), read the skill in
+`.agents/skills/griptape-nodes-rez-build/SKILL.md`.
+
 ## Development
 
 ```bash

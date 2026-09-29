@@ -170,6 +170,13 @@ def write_launch_command(
     version: Annotated[
         str | None, typer.Option("--version", help="Launch package version. Defaults to one above the newest.")
     ] = None,
+    allow_sandbox: Annotated[
+        bool,
+        typer.Option(
+            "--allow-sandbox",
+            help="Let the engine load the sandbox library too; its imports must come from this environment.",
+        ),
+    ] = False,
     print_only: Annotated[bool, typer.Option("--print", help="Show the package instead of writing it.")] = False,
     rebuild: Annotated[bool, typer.Option("--rebuild", help="Replace a launch package of the same version.")] = False,
     yes: YesOption = False,  # noqa: ARG001 - accepted for scripted use; this command never prompts
@@ -194,6 +201,7 @@ def write_launch_command(
                 print_only=print_only,
                 rebuild=rebuild,
                 rez_tools=located,
+                allow_sandbox=allow_sandbox,
             )
         )
 

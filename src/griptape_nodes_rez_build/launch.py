@@ -10,6 +10,9 @@ engine for that environment:
   worker's ``rez env`` reads it too. ``--testing-store`` is recorded in the package
   (``testing_stores``) and sets nothing: the engine reads no rez settings, so rez itself has to
   find the store through ``--config-file``.
+- ``--allow-sandbox``: ``GTN_CONFIG_LIBRARY__ENVIRONMENT_ALLOWS_SANDBOX=true``, so the engine also
+  loads the sandbox library in the orchestrator (its imports must come from this environment; no
+  virtualenv is built). Everything else stays as strict as environment mode is without it.
 - ``GTN_CONFIG_WORKER__COMMAND_PREFIX``: each library's worker starts inside
   ``rez env --norc griptape_nodes_engine==<engine> <library request> --``, with the absolute rez
   path of that platform. The engine fills ``{engine_version}`` and ``{library_request}``.
@@ -29,6 +32,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from rich.console import Console
 
 from griptape_nodes_rez_build.console import console
 from griptape_nodes_rez_build.engine import ENGINE_FAMILY
@@ -53,6 +58,7 @@ DEFAULT_LAUNCH_VERSION = "1.0.0"
 
 ENV_DEPENDENCY_SOURCE = "GTN_CONFIG_LIBRARY__DEPENDENCY_SOURCE"
 ENV_COMMAND_PREFIX = "GTN_CONFIG_WORKER__COMMAND_PREFIX"
+ENV_ALLOWS_SANDBOX = "GTN_CONFIG_LIBRARY__ENVIRONMENT_ALLOWS_SANDBOX"
 DEPENDENCY_SOURCE_ENVIRONMENT = "environment"
 ENGINE_VERSION_PLACEHOLDER = "{engine_version}"
 LIBRARY_REQUEST_PLACEHOLDER = "{library_request}"
@@ -63,7 +69,7 @@ _PLATFORM_KEYS = {"darwin": "osx", "win32": "windows"}
 _VALIDATE_SCRIPT = """\
 import json, os, subprocess, sys
 import griptape_nodes, griptape_nodes_app
-names = ("GTN_LIBRARY_PATHS", "GTN_LIBRARY_WORKER_REQUESTS", "GTN_CONFIG_LIBRARY__DEPENDENCY_SOURCE", "GTN_CONFIG_WORKER__COMMAND_PREFIX")
+names = ("GTN_LIBRARY_PATHS", "GTN_LIBRARY_WORKER_REQUESTS", "GTN_CONFIG_LIBRARY__DEPENDENCY_SOURCE", "GTN_CONFIG_WORKER__COMMAND_PREFIX", "GTN_CONFIG_LIBRARY__ENVIRONMENT_ALLOWS_SANDBOX")
 found = {name: os.environ.get(name, "") for name in names}
 found["griptape_nodes"] = griptape_nodes.__file__
 found["griptape_nodes_app"] = griptape_nodes_app.__file__
@@ -116,6 +122,8 @@ class LaunchPackage:
     library_requests: list[str]
     per_platform: dict[str, PlatformSettings]
     shared: dict[str, str]
+    # --allow-sandbox: the engine may load the sandbox library in environment mode.
+    allow_sandbox: bool = False
 
 
 @dataclass(frozen=True)
@@ -131,6 +139,7 @@ class LaunchOptions:
     print_only: bool
     rebuild: bool
     rez_tools: RezTools | None
+    allow_sandbox: bool = False
 
 
 def write_launch(options: LaunchOptions) -> None:
@@ -145,12 +154,16 @@ def write_launch(options: LaunchOptions) -> None:
     _check_absolute(testing_stores, "--testing-store")
     _check_absolute(config_files, "--config-file")
     shared = parse_set_values(options.set_values)
+    # With --print, stdout carries only the package; everything else goes to stderr.
+    notices = console
+    if options.print_only:
+        notices = Console(stderr=True)
     if not options.libraries:
-        console.print(
+        notices.print(
             "[yellow]No --library given: the launch package provides the engine only, and no libraries will load.[/yellow]"
         )
     if testing_stores and not config_files:
-        console.print(
+        notices.print(
             "[yellow]--testing-store is recorded in the package only. Give a rezconfig that adds the store with "
             "--config-file so workers find it.[/yellow]"
         )
@@ -167,7 +180,9 @@ def write_launch(options: LaunchOptions) -> None:
             for platform, path in tool_paths.items()
         },
         shared=shared,
+        allow_sandbox=options.allow_sandbox,
     )
+    _print_summary(package, notices)
     content = launch_package_content(package)
     if options.print_only:
         # Plain text: the console would wrap long lines and break the generated code.
@@ -223,6 +238,12 @@ def launch_package_content(package: LaunchPackage) -> str:
             "# reads no rez settings. Rez finds these stores through the rezconfig given with --config-file.\n"
             f"testing_stores = {testing_stores!r}\n"
         )
+    sandbox_lines = ""
+    if package.allow_sandbox:
+        sandbox_lines = (
+            "    # --allow-sandbox: the sandbox library loads in the orchestrator, its imports from this environment.\n"
+            f"    setenv({ENV_ALLOWS_SANDBOX!r}, 'true')\n"
+        )
     stop_message = f"{LAUNCH_FAMILY} is not set up for this platform (set up for: {platforms}). Platform: "
 
     return f"""{GENERATED_HEADER}# Start Griptape Nodes with: rez env {LAUNCH_FAMILY} -- gtn
@@ -245,7 +266,7 @@ def commands():
         stop({stop_message!r} + system.platform)
     platform_settings = settings[system.platform]
     setenv({ENV_DEPENDENCY_SOURCE!r}, {DEPENDENCY_SOURCE_ENVIRONMENT!r})
-    # literal(): the engine fills the {{...}} placeholders, rez must leave them alone.
+{sandbox_lines}    # literal(): the engine fills the {{...}} placeholders, rez must leave them alone.
     setenv({ENV_COMMAND_PREFIX!r}, literal(platform_settings['command_prefix']))
     if 'config_file' in platform_settings:
         # Rez replaces a variable the first time a package appends to it, so the studio's
@@ -260,6 +281,22 @@ def commands():
 
 format_version = 2
 """
+
+
+def _print_summary(package: LaunchPackage, out: Console) -> None:
+    out.print("[bold]Summary:[/bold]")
+    out.print(f"  Package:    [cyan]{LAUNCH_FAMILY}-{package.version}[/cyan]")
+    out.print(f"  Engine:     [cyan]{ENGINE_FAMILY}=={package.engine_version}[/cyan]")
+    libraries = ", ".join(package.library_requests) or "none (engine only)"
+    out.print(f"  Libraries:  [cyan]{libraries}[/cyan]")
+    out.print(f"  Platforms:  [cyan]{', '.join(sorted(package.per_platform))}[/cyan]")
+    if package.allow_sandbox:
+        out.print(
+            "  Sandbox:    [green]allowed[/green] (--allow-sandbox): the sandbox library loads in the editor; its "
+            "imports must come from this environment"
+        )
+    else:
+        out.print("  Sandbox:    not allowed (--allow-sandbox allows it)")
 
 
 def validate_launch(tools: RezTools, package: LaunchPackage, *, store: Path) -> None:
@@ -419,6 +456,11 @@ def _launch_environment_problems(
     problems: list[str] = []
     if found[ENV_DEPENDENCY_SOURCE] != DEPENDENCY_SOURCE_ENVIRONMENT:
         problems.append(f"{ENV_DEPENDENCY_SOURCE} is {found[ENV_DEPENDENCY_SOURCE]!r}")
+    expected_sandbox = ""
+    if package.allow_sandbox:
+        expected_sandbox = "true"
+    if found.get(ENV_ALLOWS_SANDBOX, "") != expected_sandbox:
+        problems.append(f"{ENV_ALLOWS_SANDBOX} is {found.get(ENV_ALLOWS_SANDBOX, '')!r}, expected {expected_sandbox!r}")
     expected_prefix = json.dumps(package.per_platform[platform].command_prefix)
     if found[ENV_COMMAND_PREFIX] != expected_prefix:
         problems.append(f"{ENV_COMMAND_PREFIX} is {found[ENV_COMMAND_PREFIX]!r}, expected {expected_prefix!r}")

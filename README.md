@@ -121,7 +121,7 @@ The check: both packages resolve from the store, and `GTN_LIBRARY_PATHS` and
 ```bash
 griptape-nodes-rez write-launch --tools PLATFORM=PATH ... --library FAMILY[-VERSION] ... \
     --local-packages-path PATH [--testing-store PLATFORM=PATH] [--config-file PLATFORM=PATH] \
-    [--set NAME=VALUE ...] [--engine-version V] [--version V] [--print] [--rebuild] [--yes]
+    [--set NAME=VALUE ...] [--allow-sandbox] [--engine-version V] [--version V] [--print] [--rebuild] [--yes]
 ```
 
 Writes `griptape_launch`, requiring `griptape_nodes_engine==<engine>` and the chosen libraries'
@@ -134,6 +134,13 @@ not given with `--tools`:
 - `GTN_CONFIG_WORKER__COMMAND_PREFIX=["<tools>/rez", "env", "--norc", "griptape_nodes_engine=={engine_version}", "{library_request}", "--"]`,
   written with `literal()` so rez leaves the placeholders for the engine to fill
 - `--set` values on every platform (`XDG_CONFIG_HOME`, for example)
+- `--allow-sandbox` (off by default): `GTN_CONFIG_LIBRARY__ENVIRONMENT_ALLOWS_SANDBOX=true` on every
+  platform. The engine then also loads the sandbox library (its `sandbox_library_directory`) in the
+  editor's own process, and artists can add sandbox nodes and refresh the sandbox. No virtualenv
+  is built for it: its imports must come from this launch environment, so a sandbox node needing
+  a package the environment lacks fails to load. Everything else stays strict: only the libraries
+  the environment publishes load, and nothing is downloaded or installed. Without the option the
+  engine refuses the sandbox in environment mode.
 - `--config-file`: appended to `REZ_CONFIG_FILE`, after the studio's configuration, so every
   worker's `rez env` reads it too. Rez replaces an inherited variable the first time a package
   appends to it (unless the studio lists it in `parent_variables`), so the package reads the
@@ -145,7 +152,7 @@ not given with `--tools`:
   `--config-file`).
 
 `--tools` paths must be absolute on their platform; `PLATFORM` is `linux`, `osx`, or `windows`.
-`--print` shows the package instead of writing it. `--version` defaults to one patch above the
+`--print` shows the package on stdout instead of writing it (the summary and notices go to stderr). `--version` defaults to one patch above the
 newest launch package in the store; an existing version is replaced only with `--rebuild`.
 
 The check (on a platform the package is set up for): `rez env griptape_launch==<version>`

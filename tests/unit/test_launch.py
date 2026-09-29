@@ -115,6 +115,16 @@ class TestContent:
         )
         assert run.environ["REZ_CONFIG_FILE"] == "P:/a.py;P:/b.py" + os.pathsep + "P:/gtn.py"
 
+    @pytest.mark.parametrize("platform", ["osx", "windows"])
+    def test_allow_sandbox_is_set_on_every_platform(self, platform: str) -> None:
+        run = run_commands(launch_package_content(_package(allow_sandbox=True)), platform=platform)
+        assert run.environ["GTN_CONFIG_LIBRARY__ENVIRONMENT_ALLOWS_SANDBOX"] == "true"
+        assert run.environ["GTN_CONFIG_LIBRARY__DEPENDENCY_SOURCE"] == "environment"
+
+    def test_sandbox_setting_absent_by_default(self) -> None:
+        run = run_commands(launch_package_content(_package()), platform="osx")
+        assert "GTN_CONFIG_LIBRARY__ENVIRONMENT_ALLOWS_SANDBOX" not in run.environ
+
     def test_unconfigured_platform_stops(self) -> None:
         with pytest.raises(Stopped, match="set up for: osx, windows"):
             run_commands(launch_package_content(_package()), platform="linux")
@@ -192,9 +202,33 @@ class TestWriteLaunch:
 
         write_launch(self._options(tmp_path, None, libraries=[], print_only=True))
 
-        output = capsys.readouterr().out
-        assert "'griptape_nodes_engine==0.103.0',\n]" in output
-        assert "no libraries will load" in " ".join(output.split())
+        captured = capsys.readouterr()
+        assert "'griptape_nodes_engine==0.103.0',\n]" in captured.out
+        # --print keeps stdout for the package; notices go to stderr.
+        assert captured.out.startswith("# -*- coding: utf-8 -*-")
+        assert "no libraries will load" in " ".join(captured.err.split())
+
+    def test_allow_sandbox_shows_in_print_output_and_summary(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _add_package(tmp_path, "griptape_nodes_engine", "0.103.0")
+        _add_package(tmp_path, "rez_test_edit", "0.1.0")
+
+        write_launch(self._options(tmp_path, None, print_only=True, allow_sandbox=True))
+
+        captured = capsys.readouterr()
+        assert "setenv('GTN_CONFIG_LIBRARY__ENVIRONMENT_ALLOWS_SANDBOX', 'true')" in captured.out
+        assert "Sandbox: allowed (--allow-sandbox)" in " ".join(captured.err.split())
+
+    def test_sandbox_is_off_by_default(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        _add_package(tmp_path, "griptape_nodes_engine", "0.103.0")
+        _add_package(tmp_path, "rez_test_edit", "0.1.0")
+
+        write_launch(self._options(tmp_path, None, print_only=True))
+
+        captured = capsys.readouterr()
+        assert "ENVIRONMENT_ALLOWS_SANDBOX" not in captured.out
+        assert "Sandbox: not allowed" in " ".join(captured.err.split())
 
     def test_relative_tools_path_is_refused(self, tmp_path: Path) -> None:
         with pytest.raises(BuildError, match="not an absolute path on windows"):
@@ -294,6 +328,17 @@ class TestValidateLaunch:
         fake_tools.env_results = [ok(self._found(tmp_path, package, platform, workers=[worker]))]
         with pytest.raises(BuildError, match="package family not found: python"):
             validate_launch(fake_tools, package, store=tmp_path)
+
+    def test_check_expects_the_sandbox_setting_when_allowed(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
+        package, platform = self._this_platform_package(allow_sandbox=True)
+        fake_tools.env_results = [ok(self._found(tmp_path, package, platform))]
+        with pytest.raises(BuildError, match="ENVIRONMENT_ALLOWS_SANDBOX is '', expected 'true'"):
+            validate_launch(fake_tools, package, store=tmp_path)
+
+        fake_tools.env_results = [
+            ok(self._found(tmp_path, package, platform, GTN_CONFIG_LIBRARY__ENVIRONMENT_ALLOWS_SANDBOX="true"))
+        ]
+        validate_launch(fake_tools, package, store=tmp_path)
 
     def test_wrong_prefix_fails(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
         package, platform = self._this_platform_package()

@@ -209,7 +209,9 @@ class TestFetchPublishedEngine:
             dependencies=[],
             requires_python="",
         )
-        version_dir = write_engine_package(project, PackageRequires(common=[], platform=None), store=tmp_path / "s")
+        version_dir = write_engine_package(
+            project, PackageRequires(common=[], platform=None), store=tmp_path / "s"
+        ).version_dir
         assert sorted(p.name for p in (version_dir / "python").iterdir()) == [
             "griptape_nodes",
             "griptape_nodes_engine-0.102.1.dist-info",
@@ -244,7 +246,7 @@ class TestEnginePackage:
         project = read_engine_project(_engine_repo(tmp_path))
         store = tmp_path / "store"
 
-        version_dir = write_engine_package(project, PackageRequires(common=[], platform=None), store=store)
+        version_dir = write_engine_package(project, PackageRequires(common=[], platform=None), store=store).version_dir
 
         assert (version_dir / "package.py").is_file()
         assert (version_dir / "python" / "griptape_nodes" / "__init__.py").is_file()
@@ -386,6 +388,23 @@ class TestBuildEngine:
         assert not new_dependency.exists()
         # Not written by this build: kept.
         assert existing.is_file()
+
+    def test_a_failed_rebuild_puts_the_previous_engine_package_back(
+        self, tmp_path: Path, fake_tools: FakeRezTools
+    ) -> None:
+        package_file = tmp_path / "store" / "griptape_nodes_engine" / "0.103.0" / "package.py"
+        package_file.parent.mkdir(parents=True)
+        package_file.write_text("# the engine package artists use today\n", encoding="utf-8")
+        fake_tools.env_results = [failed("conflict")]
+
+        with (
+            patch.object(engine, "install_packages", return_value=self._report()),
+            pytest.raises(BuildError, match="the version it replaced is back in place"),
+        ):
+            build_engine(self._options(tmp_path, fake_tools, rebuild=True))
+
+        assert package_file.read_text(encoding="utf-8") == "# the engine package artists use today\n"
+        assert [p.name for p in package_file.parent.parent.iterdir()] == ["0.103.0"]
 
     def test_failed_check_on_kept_packages_says_to_rebuild(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
         package_file = tmp_path / "store" / "griptape_nodes_engine" / "0.103.0" / "package.py"

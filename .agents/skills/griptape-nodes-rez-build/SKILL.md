@@ -163,7 +163,8 @@ griptape-nodes-rez gpu-config    [--local-packages-path PATH ...]
   `<2.0.0.1`, `>1.0` -> `1.0.0.1+`, `!=1.5` -> `<1.5|1.5.0.1+`; a bound on a pre-release uses its
   release), unconvertible specifiers fail the build (table in `versions.py`); payloads staged and
   renamed, `package.py` last via temp file and rename; builds are resolved before they count as
-  done, and a build whose final check fails removes what it wrote. Rez checks run from script files,
+  done, and a build whose final check fails removes what it wrote (a version replaced with
+  `--rebuild` is kept aside until the check passes and put back on failure). Rez checks run from script files,
   never `python -c` (Windows `rez-env` strips double quotes).
 
 ## Torch builds and the guard

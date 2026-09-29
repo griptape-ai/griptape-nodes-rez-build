@@ -48,6 +48,7 @@ from griptape_nodes_rez_build.store import (
     PACKAGE_FILE,
     WrittenPackage,
     copy_tree,
+    discard_retired,
     move_into_place,
     package_exists,
     staging_dir,
@@ -173,12 +174,12 @@ def _build_engine_project(
     if exists and not options.rebuild:
         console.print(f"[bold]Kept[/bold] {ENGINE_FAMILY}-{project.version} (pass --rebuild to replace it).")
     else:
-        version_dir = write_engine_package(project, requires, store=options.store)
-        written.append(WrittenPackage(version_dir=version_dir, variant=None))
+        written.append(write_engine_package(project, requires, store=options.store))
     try:
         validate_engine(options.tools, paths, project.version, store=options.store, editor=options.editor)
     except BuildError as exc:
         raise rolled_back(exc, written) from exc
+    discard_retired(written)
 
 
 def fetch_published_engine(engine_version: str | None, app_request: str, work_dir: Path) -> EngineProject:
@@ -286,7 +287,7 @@ def engine_requires(
     return PackageRequires(common=common, platform=platform)
 
 
-def write_engine_package(project: EngineProject, requires: PackageRequires, *, store: Path) -> Path:
+def write_engine_package(project: EngineProject, requires: PackageRequires, *, store: Path) -> WrittenPackage:
     """Write the engine package: source and ``.dist-info`` staged, ``package.py`` last, renamed into place."""
     version_dir = store / ENGINE_FAMILY / project.version
     console.print(f"[bold]Writing[/bold] {ENGINE_FAMILY}-{project.version}...")
@@ -296,7 +297,7 @@ def write_engine_package(project: EngineProject, requires: PackageRequires, *, s
         copy_tree(project.source / ENGINE_IMPORT_NAME, python_dir / ENGINE_IMPORT_NAME)
         _write_dist_info(python_dir, project.version)
         write_text_atomic(staged / PACKAGE_FILE, engine_package_content(project, requires))
-        move_into_place(staged, version_dir)
+        retired = move_into_place(staged, version_dir)
     finally:
         shutil.rmtree(staged, ignore_errors=True)
     console.print(
@@ -307,7 +308,7 @@ def write_engine_package(project: EngineProject, requires: PackageRequires, *, s
             expand=False,
         )
     )
-    return version_dir
+    return WrittenPackage(version_dir=version_dir, variant=None, retired=retired)
 
 
 def engine_package_content(project: EngineProject, requires: PackageRequires) -> str:

@@ -60,6 +60,7 @@ from griptape_nodes_rez_build.store import (
     PACKAGE_FILE,
     WrittenPackage,
     copy_tree,
+    discard_retired,
     move_into_place,
     newest_version,
     package_exists,
@@ -182,6 +183,7 @@ def build_library_from_dir(library_dir: Path, options: LibraryBuildOptions) -> B
         )
     except BuildError as exc:
         raise rolled_back(exc, written) from exc
+    discard_retired(written)
     return BuiltLibrary(family=family, version=version, torch_backends=installed.torch_backends)
 
 
@@ -296,10 +298,10 @@ def write_library_packages(  # noqa: PLR0913
             if with_source:
                 copy_tree(manifest.path.parent, staged / "python" / family.folder)
             write_text_atomic(staged / PACKAGE_FILE, content)
-            move_into_place(staged, store / package_family / version)
+            retired = move_into_place(staged, store / package_family / version)
         finally:
             shutil.rmtree(staged, ignore_errors=True)
-        written.append(WrittenPackage(version_dir=store / package_family / version, variant=None))
+        written.append(WrittenPackage(version_dir=store / package_family / version, variant=None, retired=retired))
         console.print(f"  Wrote [cyan]{package_family}-{version}[/cyan]")
     return written
 

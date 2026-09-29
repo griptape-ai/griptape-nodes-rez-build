@@ -7,9 +7,11 @@ import json
 import os
 import sys
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 
+from griptape_nodes_rez_build import launch
 from griptape_nodes_rez_build.errors import BuildError
 from griptape_nodes_rez_build.launch import (
     LaunchOptions,
@@ -250,6 +252,58 @@ class TestWriteLaunch:
         with pytest.raises(BuildError, match="was removed"):
             write_launch(self._options(tmp_path, fake_tools, tools=[f"{this_platform}=/opt/rez/bin/rez"]))
         assert not (tmp_path / "griptape_launch" / "1.0.0").exists()
+
+    def test_a_failed_rebuild_puts_the_previous_launch_package_back(
+        self, tmp_path: Path, fake_tools: FakeRezTools
+    ) -> None:
+        _add_package(tmp_path, "griptape_nodes_engine", "0.103.0")
+        _add_package(tmp_path, "rez_test_edit", "0.1.0")
+        previous = tmp_path / "griptape_launch" / "1.2.0" / "package.py"
+        previous.parent.mkdir(parents=True)
+        previous.write_text("# the launch package artists use today\n", encoding="utf-8")
+        this_platform = {"darwin": "osx", "win32": "windows"}.get(sys.platform, "linux")
+        fake_tools.env_results = [failed("conflict")]
+
+        with pytest.raises(BuildError, match="put back as it was before this build"):
+            write_launch(
+                self._options(
+                    tmp_path, fake_tools, tools=[f"{this_platform}=/opt/rez/bin/rez"], version="1.2.0", rebuild=True
+                )
+            )
+
+        assert previous.read_text(encoding="utf-8") == "# the launch package artists use today\n"
+        assert [p.name for p in (tmp_path / "griptape_launch").iterdir()] == ["1.2.0"]
+
+    def test_a_passing_rebuild_leaves_no_retired_folder(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
+        _add_package(tmp_path, "griptape_nodes_engine", "0.103.0")
+        _add_package(tmp_path, "rez_test_edit", "0.1.0")
+        previous = tmp_path / "griptape_launch" / "1.2.0" / "package.py"
+        previous.parent.mkdir(parents=True)
+        previous.write_text("# old\n", encoding="utf-8")
+        this_platform = {"darwin": "osx", "win32": "windows"}.get(sys.platform, "linux")
+
+        with patch.object(launch, "validate_launch"):
+            write_launch(
+                self._options(
+                    tmp_path, fake_tools, tools=[f"{this_platform}=/opt/rez/bin/rez"], version="1.2.0", rebuild=True
+                )
+            )
+
+        assert "name = 'griptape_launch'" in previous.read_text(encoding="utf-8")
+        assert [p.name for p in (tmp_path / "griptape_launch").iterdir()] == ["1.2.0"]
+
+    def test_a_write_error_leaves_no_staging_folder(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
+        _add_package(tmp_path, "griptape_nodes_engine", "0.103.0")
+        _add_package(tmp_path, "rez_test_edit", "0.1.0")
+        this_platform = {"darwin": "osx", "win32": "windows"}.get(sys.platform, "linux")
+
+        with (
+            patch.object(launch, "move_into_place", side_effect=OSError("disk full")),
+            pytest.raises(OSError, match="disk full"),
+        ):
+            write_launch(self._options(tmp_path, fake_tools, tools=[f"{this_platform}=/opt/rez/bin/rez"]))
+
+        assert list((tmp_path / "griptape_launch").iterdir()) == []
 
     def test_missing_engine(self, tmp_path: Path) -> None:
         _add_package(tmp_path, "rez_test_edit", "0.1.0")

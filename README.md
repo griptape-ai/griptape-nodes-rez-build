@@ -242,7 +242,9 @@ A build whose final rez check fails removes what that run wrote (package version
 and variants it added to versions other builds created) and lists them in the error, so a plain
 rerun builds them again instead of reusing packages that do not resolve. Packages other builds
 wrote are never touched. When everything involved was already in the store, the error says to
-pass `--rebuild`.
+pass `--rebuild`. With `--rebuild`, a replaced engine, library, or launch package version is kept
+aside (in a folder rez ignores) until the check passes, and put back if it fails, so a failed
+rebuild leaves artists the version that worked.
 
 Nothing is ever half-written: payloads are staged next to their destination, renamed into
 place, and `package.py` is written last, itself through a temporary file and a rename.

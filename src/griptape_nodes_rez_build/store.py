@@ -37,6 +37,9 @@ class WrittenPackage:
     variant: list[str] | None
     # The version's package.py before this build added the variant, restored on roll back.
     previous_package_file: str | None = None
+    # The version this build replaced (--rebuild), kept aside until the build's check passes:
+    # moved back on roll back, deleted by discard_retired.
+    retired: Path | None = None
 
     @property
     def label(self) -> str:
@@ -56,6 +59,11 @@ def roll_back(written: list[WrittenPackage]) -> list[str]:
     """
     removed: list[str] = []
     for item in reversed(written):
+        if item.variant is None and item.retired is not None and item.retired.exists():
+            shutil.rmtree(item.version_dir, ignore_errors=True)
+            item.retired.rename(item.version_dir)
+            removed.append(f"{item.label} (the version it replaced is back in place)")
+            continue
         if not item.version_dir.exists():
             continue
         if item.variant is None:
@@ -107,19 +115,28 @@ def staging_dir(parent: Path, label: str) -> Path:
     return path
 
 
-def move_into_place(staged: Path, target: Path) -> None:
+def move_into_place(staged: Path, target: Path) -> Path | None:
     """Rename *staged* to *target*, replacing a folder already there.
 
-    The old folder is renamed aside first and deleted only after the new one is in place.
+    The old folder is renamed aside first and returned, not deleted: a build keeps it until its
+    check passes, so a failed check can put it back (see ``roll_back`` and ``discard_retired``).
+    The name starts with a dot, so rez never reads it. Returns None when nothing was replaced.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     if not target.exists():
         staged.rename(target)
-        return
+        return None
     retired = target.parent / f".retired-{target.name}-{uuid.uuid4().hex[:12]}"
     target.rename(retired)
     staged.rename(target)
-    shutil.rmtree(retired, ignore_errors=True)
+    return retired
+
+
+def discard_retired(written: list[WrittenPackage]) -> None:
+    """Delete the versions a build replaced, once its check has passed."""
+    for item in written:
+        if item.retired is not None:
+            shutil.rmtree(item.retired, ignore_errors=True)
 
 
 def write_text_atomic(path: Path, text: str) -> None:

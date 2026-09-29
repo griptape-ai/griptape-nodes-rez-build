@@ -44,9 +44,12 @@ from griptape_nodes_rez_build.manifest import EDIT_SUFFIX
 from griptape_nodes_rez_build.package_py import GENERATED_HEADER, list_literal
 from griptape_nodes_rez_build.store import (
     PACKAGE_FILE,
+    WrittenPackage,
+    discard_retired,
     move_into_place,
     newest_version,
     package_exists,
+    roll_back,
     staging_dir,
     write_text_atomic,
 )
@@ -209,21 +212,32 @@ def write_launch(options: LaunchOptions) -> None:
             "Pass --version for a new version, or --rebuild to replace it."
         )
         raise BuildError(msg)
-    staged = staging_dir(options.store / LAUNCH_FAMILY, package.version)
-    write_text_atomic(staged / PACKAGE_FILE, content)
-    move_into_place(staged, options.store / LAUNCH_FAMILY / package.version)
-    console.print(f"  Wrote [cyan]{options.store / LAUNCH_FAMILY / package.version / PACKAGE_FILE}[/cyan]")
-
+    # Checked before writing, so a package that can never be checked is never written.
     if options.rez_tools is None:
         msg = f"Attempted to check {LAUNCH_FAMILY}-{package.version}. Failed because rez's tools were not found."
         raise BuildError(msg)
+    version_dir = options.store / LAUNCH_FAMILY / package.version
+    staged = staging_dir(options.store / LAUNCH_FAMILY, package.version)
+    try:
+        write_text_atomic(staged / PACKAGE_FILE, content)
+        retired = move_into_place(staged, version_dir)
+    finally:
+        shutil.rmtree(staged, ignore_errors=True)
+    written = [WrittenPackage(version_dir=version_dir, variant=None, retired=retired)]
+    console.print(f"  Wrote [cyan]{version_dir / PACKAGE_FILE}[/cyan]")
+
     try:
         validate_launch(options.rez_tools, package, store=options.store)
     except BuildError as exc:
-        # A launch package that does not resolve would be the newest one artists get.
-        shutil.rmtree(options.store / LAUNCH_FAMILY / package.version, ignore_errors=True)
-        msg = f"{exc}\n{LAUNCH_FAMILY}-{package.version} was removed from {options.store}."
+        # A launch package that does not resolve would be the newest one artists get. With
+        # --rebuild, the version it replaced goes back, so artists keep the one that worked.
+        roll_back(written)
+        outcome = "was removed from"
+        if retired is not None:
+            outcome = "was put back as it was before this build in"
+        msg = f"{exc}\n{LAUNCH_FAMILY}-{package.version} {outcome} {options.store}."
         raise BuildError(msg) from exc
+    discard_retired(written)
 
 
 def launch_package_content(package: LaunchPackage) -> str:

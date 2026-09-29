@@ -950,6 +950,29 @@ class TestCopyPayload:
         windows = (payload / "bin" / "demo.cmd").read_bytes()
         assert windows == b'@python -c "import sys; from demo.cli import app; sys.exit(app.main())" %*\r\n'
 
+    def test_posix_launcher_has_unix_line_endings_when_built_on_windows(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # On Windows, text written without newline= gets "\r\n" line endings; a Windows build must
+        # still write "\n", or the shebang reads "python\r" on the Linux and macOS machines that
+        # run this pure-Python package. Simulate Windows text mode on any platform.
+        real_write_text = Path.write_text
+
+        def windows_write_text(
+            path: Path, data: str, encoding: str | None = None, errors: str | None = None, newline: str | None = None
+        ) -> int:
+            if newline is None:
+                data = data.replace("\n", "\r\n")
+            return real_write_text(path, data, encoding=encoding, errors=errors, newline=newline)
+
+        monkeypatch.setattr(Path, "write_text", windows_write_text)
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+
+        rez_uv._write_console_script(bin_dir, "demo-tool", "demo_tool:main")
+
+        assert b"\r" not in (bin_dir / "demo-tool").read_bytes()
+
     def test_posix_launcher_runs(self, tmp_path: Path) -> None:
         if sys.platform == "win32":
             pytest.skip("POSIX launcher")

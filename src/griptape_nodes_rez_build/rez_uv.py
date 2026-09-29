@@ -1044,7 +1044,9 @@ def _write_console_script(bin_dir: Path, name: str, target: str) -> None:
     call = f"import sys; from {module.strip()} import {imported}; sys.exit({attribute}())"
 
     posix_script = bin_dir / name
-    posix_script.write_text(f"#!/usr/bin/env python\n{call.replace('; ', chr(10))}\n", encoding="utf-8")
+    # newline="\n": a pure-Python package built on Windows is the one Linux and macOS run, and a
+    # CRLF shebang fails there with "env: 'python\r': No such file or directory".
+    posix_script.write_text(f"#!/usr/bin/env python\n{call.replace('; ', chr(10))}\n", encoding="utf-8", newline="\n")
     posix_script.chmod(0o755)
     (bin_dir / f"{name}.cmd").write_text(f'@python -c "{call}" %*\r\n', encoding="utf-8", newline="")
 
@@ -1107,7 +1109,10 @@ def write_rez_package(  # noqa: PLR0913
     staged = staging_dir(packages_dir / family_name, clean_version)
     try:
         _copy_payload(install_dir, staged, info.console_script_targets)
-        move_into_place(staged, version_dir / _variant_subpath(variant))
+        # A rebuilt variant replaces this machine's variant outright; roll back never restores it.
+        retired = move_into_place(staged, version_dir / _variant_subpath(variant))
+        if retired is not None:
+            shutil.rmtree(retired, ignore_errors=True)
     finally:
         shutil.rmtree(staged, ignore_errors=True)
     _write_package_py(

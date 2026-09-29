@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from griptape_nodes_rez_build.rez_uv import read_package_file
-from griptape_nodes_rez_build.store import WrittenPackage, roll_back
+from griptape_nodes_rez_build.store import WrittenPackage, discard_retired, move_into_place, roll_back
 
 OSX = ["platform-osx", "arch-arm64", "python-3.12"]
 WINDOWS = ["platform-windows", "arch-AMD64", "python-3.12"]
@@ -48,3 +48,40 @@ class TestRollBack:
 
     def test_already_gone_is_skipped(self, tmp_path: Path) -> None:
         assert roll_back([WrittenPackage(version_dir=tmp_path / "nope" / "1.0", variant=None)]) == []
+
+    def test_a_replaced_version_is_put_back(self, tmp_path: Path) -> None:
+        version_dir = _package(tmp_path, [OSX])
+        staged = tmp_path / "torch" / ".staging-new"
+        staged.mkdir()
+        (staged / "package.py").write_text("name = 'torch'  # the failed rebuild\n", encoding="utf-8")
+        retired = move_into_place(staged, version_dir)
+
+        removed = roll_back([WrittenPackage(version_dir=version_dir, variant=None, retired=retired)])
+
+        assert removed == ["torch-2.7.0 (the version it replaced is back in place)"]
+        assert read_package_file(version_dir / "package.py").variants == [OSX]
+        assert retired is not None
+        assert not retired.exists()
+
+
+class TestMoveIntoPlace:
+    def test_a_new_version_replaces_nothing(self, tmp_path: Path) -> None:
+        staged = tmp_path / ".staging"
+        staged.mkdir()
+
+        assert move_into_place(staged, tmp_path / "pkg" / "1.0") is None
+        assert (tmp_path / "pkg" / "1.0").is_dir()
+
+    def test_the_replaced_version_is_kept_aside_until_discarded(self, tmp_path: Path) -> None:
+        version_dir = _package(tmp_path, [OSX])
+        staged = tmp_path / "torch" / ".staging-new"
+        staged.mkdir()
+
+        retired = move_into_place(staged, version_dir)
+
+        assert retired is not None
+        assert retired.name.startswith(".retired-")
+        assert (retired / "package.py").is_file()
+        discard_retired([WrittenPackage(version_dir=version_dir, variant=None, retired=retired)])
+        assert not retired.exists()
+        assert version_dir.is_dir()

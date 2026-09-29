@@ -25,6 +25,7 @@ from griptape_nodes_rez_build.library import (
 )
 from griptape_nodes_rez_build.manifest import LibraryDependency, LibraryFamily, LibraryManifest
 from griptape_nodes_rez_build.rez_uv import InstallReport, ResolvedPackage
+from griptape_nodes_rez_build.store import WrittenPackage
 from tests.unit.conftest import FakeRezTools, failed, ok
 from tests.unit.rex_fake import run_commands
 
@@ -317,3 +318,36 @@ class TestValidateLibrary:
         fake_tools.env_results = [ok(self._published(store, "Other=other==1.0"))]
         with pytest.raises(BuildError, match="GTN_LIBRARY_WORKER_REQUESTS"):
             validate_library(fake_tools, [store], _manifest(tmp_path), FAMILY, version="0.1.0", torch_backends=[])
+
+
+class TestBuildLibraryRollBack:
+    def test_failed_check_removes_the_packages_this_build_wrote(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
+        library_dir = tmp_path / "rez-test"
+        library_dir.mkdir()
+        (library_dir / "griptape_nodes_library.json").write_text(
+            json.dumps(
+                {
+                    "name": "Rez Test Library",
+                    "metadata": {"library_version": "0.1.0", "dependencies": {"pip_dependencies": ["tabulate>=0.9"]}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        store = tmp_path / "store"
+        new_dependency = store / "tabulate" / "0.9.0"
+        (new_dependency / "python-3.12").mkdir(parents=True)
+        (new_dependency / "package.py").write_text("name = 'tabulate'\n", encoding="utf-8")
+        report = InstallReport(written=[WrittenPackage(version_dir=new_dependency, variant=None)])
+        fake_tools.env_results = [failed("package not found: tabulate-0.9+")]
+
+        with (
+            patch.object(library, "install_packages", return_value=report),
+            pytest.raises(BuildError) as raised,
+        ):
+            library.build_library_from_dir(library_dir, _options(tmp_path, fake_tools))
+
+        assert "rez_test_edit-0.1.0" in str(raised.value)
+        assert "so a plain rerun builds them again" in str(raised.value)
+        assert not (store / "rez_test_edit" / "0.1.0").exists()
+        assert not (store / "rez_test" / "0.1.0").exists()
+        assert not new_dependency.exists()

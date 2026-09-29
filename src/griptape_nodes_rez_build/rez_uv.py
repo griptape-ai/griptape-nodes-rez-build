@@ -41,7 +41,7 @@ from packaging.markers import InvalidMarker, Marker
 from uv import find_uv_bin
 
 from griptape_nodes_rez_build.package_py import FALLBACK_PLATFORM_KEY, GENERATED_HEADER, list_literal, requires_block
-from griptape_nodes_rez_build.store import PACKAGE_FILE, move_into_place, staging_dir, write_text_atomic
+from griptape_nodes_rez_build.store import PACKAGE_FILE, WrittenPackage, move_into_place, staging_dir, write_text_atomic
 from griptape_nodes_rez_build.versions import SpecifierConversionError, rez_requirement
 
 if TYPE_CHECKING:
@@ -1057,12 +1057,12 @@ def write_rez_package(  # noqa: PLR0913
     backend: str | None = None,
     resolved_versions: dict[str, str] | None = None,
     provided: frozenset[str] = frozenset(),
-) -> Path:
+) -> WrittenPackage:
     """Turn one installed wheel (``uv pip install --target``) into this machine's variant of a rez package.
 
     The package gets this machine's variant; variants other machines added are kept.
     Requirements on *provided* packages (pip-normalised names the caller builds itself) are
-    left out. Returns the package's version folder.
+    left out. Returns the version folder and the variant written.
     """
     family_name = rez_name(info.pip_name)
     clean_version = re.sub(r"\+.*$", "", info.version)
@@ -1108,7 +1108,7 @@ def write_rez_package(  # noqa: PLR0913
         variant=variant,
         platform_requires=platform_requires,
     )
-    return version_dir
+    return WrittenPackage(version_dir=version_dir, variant=variant)
 
 
 def _install_one(  # noqa: PLR0913
@@ -1121,11 +1121,13 @@ def _install_one(  # noqa: PLR0913
     python_version: str,
     resolved_versions: dict[str, str] | None = None,
     provided: frozenset[str] = frozenset(),
+    written: list[WrittenPackage] | None = None,
 ) -> str | None:
     """Download and install a single resolved package as a rez package.
 
     The package gets this machine's variant; variants other machines added are kept.
     Returns None on success, otherwise a short reason the package could not be installed.
+    What was written is appended to *written*.
     """
     logger.info("[Rez][uv] installing %s==%s ...", pkg.pip_name, pkg.version)
 
@@ -1176,7 +1178,7 @@ def _install_one(  # noqa: PLR0913
             return f"could not read its wheel metadata: {exc}"
 
         try:
-            version_dir = write_rez_package(
+            written_package = write_rez_package(
                 tmp,
                 info,
                 packages_dir=packages_dir,
@@ -1185,7 +1187,9 @@ def _install_one(  # noqa: PLR0913
                 resolved_versions=resolved_versions,
                 provided=provided,
             )
-            logger.info("[Rez][uv] installed %s==%s → %s", pkg.pip_name, pkg.version, version_dir)
+            logger.info("[Rez][uv] installed %s==%s → %s", pkg.pip_name, pkg.version, written_package.version_dir)
+            if written is not None:
+                written.append(written_package)
         except OSError as exc:
             # Package-store writes fail on permissions, full disks, and network filesystems
             # that have not yet made a freshly created parent directory visible. Name the path
@@ -1263,6 +1267,9 @@ class InstallReport:
     other_platforms: set[str] = field(default_factory=set)
     # Everything the resolve chose, including provided packages the caller builds itself.
     resolved: list[ResolvedPackage] = field(default_factory=list)
+    # What this install created, for rolling back a build whose check fails. A variant rebuilt
+    # in place (--rebuild) is not listed: it existed before this install.
+    written: list[WrittenPackage] = field(default_factory=list)
 
     @property
     def resolved_versions(self) -> dict[str, str]:
@@ -1276,6 +1283,7 @@ class InstallReport:
         self.already_installed += other.already_installed
         self.other_platforms |= other.other_platforms
         self.resolved += other.resolved
+        self.written += other.written
 
 
 def install(  # noqa: PLR0913
@@ -1349,6 +1357,9 @@ def install(  # noqa: PLR0913
 
     report = InstallReport(resolved=resolved)
     failed: list[str] = []
+    # What each install wrote; a new version counts as a whole, a variant added to another
+    # build's version as that variant only (see InstallReport.written).
+    written: list[WrittenPackage] = []
 
     provided = frozenset(pip_normalize(name) for name in provided)
 
@@ -1376,13 +1387,16 @@ def install(  # noqa: PLR0913
             python_version=python_version,
             resolved_versions=resolved_versions,
             provided=provided,
+            written=written,
         )
         if failure is not None:
             failed.append(f"{label} ({failure})")
         elif state == STATE_NEW:
             report.new.append(label)
+            report.written.append(WrittenPackage(version_dir=written[-1].version_dir, variant=None))
         elif state == STATE_ADD_VARIANT:
             report.added_variant.append(label)
+            report.written.append(written[-1])
         else:
             report.rebuilt.append(label)
 

@@ -29,6 +29,7 @@ from griptape_nodes_rez_build.common import (
     check_bindings,
     install_packages,
     package_requires,
+    rolled_back,
 )
 from griptape_nodes_rez_build.console import console
 from griptape_nodes_rez_build.errors import BuildError
@@ -36,6 +37,7 @@ from griptape_nodes_rez_build.package_py import GENERATED_HEADER, requires_block
 from griptape_nodes_rez_build.rez_uv import pip_normalize
 from griptape_nodes_rez_build.store import (
     PACKAGE_FILE,
+    WrittenPackage,
     copy_tree,
     move_into_place,
     package_exists,
@@ -133,11 +135,16 @@ def build_engine(options: EngineBuildOptions) -> None:
     )
     requires = engine_requires(project, report.resolved_versions, store=options.store, editor=options.editor)
 
+    written = list(report.written)
     if exists and not options.rebuild:
         console.print(f"[bold]Kept[/bold] {ENGINE_FAMILY}-{project.version} (pass --rebuild to replace it).")
     else:
-        write_engine_package(project, requires, store=options.store)
-    validate_engine(options.tools, paths, project.version, store=options.store, editor=options.editor)
+        version_dir = write_engine_package(project, requires, store=options.store)
+        written.append(WrittenPackage(version_dir=version_dir, variant=None))
+    try:
+        validate_engine(options.tools, paths, project.version, store=options.store, editor=options.editor)
+    except BuildError as exc:
+        raise rolled_back(exc, written) from exc
 
 
 def read_engine_project(repo: Path) -> EngineProject:

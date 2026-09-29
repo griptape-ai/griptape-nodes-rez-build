@@ -215,6 +215,12 @@ packages get one variant per platform, arch, Python, and torch build, and a buil
 machine's variant without touching the others. Engine and library packages carry no variants
 and are kept when they already exist, so a second platform's build only adds its variants.
 
+A build whose final rez check fails removes what that run wrote (package versions it created,
+and variants it added to versions other builds created) and lists them in the error, so a plain
+rerun builds them again instead of reusing packages that do not resolve. Packages other builds
+wrote are never touched. When everything involved was already in the store, the error says to
+pass `--rebuild`.
+
 Nothing is ever half-written: payloads are staged next to their destination, renamed into
 place, and `package.py` is written last, itself through a temporary file and a rename.
 

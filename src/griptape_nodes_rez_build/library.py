@@ -36,6 +36,7 @@ from griptape_nodes_rez_build.common import (
     install_packages,
     package_requires,
     python_version,
+    rolled_back,
 )
 from griptape_nodes_rez_build.console import console
 from griptape_nodes_rez_build.errors import BuildError, ResolveError
@@ -57,6 +58,7 @@ from griptape_nodes_rez_build.rez_uv import (
 )
 from griptape_nodes_rez_build.store import (
     PACKAGE_FILE,
+    WrittenPackage,
     copy_tree,
     move_into_place,
     newest_version,
@@ -164,7 +166,8 @@ def build_library_from_dir(library_dir: Path, options: LibraryBuildOptions) -> B
         store=options.store,
         resolved_versions=report.resolved_versions,
     )
-    write_library_packages(
+    written = list(report.written)
+    written += write_library_packages(
         manifest,
         family,
         version,
@@ -173,7 +176,12 @@ def build_library_from_dir(library_dir: Path, options: LibraryBuildOptions) -> B
         store=options.store,
         rebuild=options.rebuild,
     )
-    validate_library(options.tools, paths, manifest, family, version=version, torch_backends=installed.torch_backends)
+    try:
+        validate_library(
+            options.tools, paths, manifest, family, version=version, torch_backends=installed.torch_backends
+        )
+    except BuildError as exc:
+        raise rolled_back(exc, written) from exc
     return BuiltLibrary(family=family, version=version, torch_backends=installed.torch_backends)
 
 
@@ -270,8 +278,12 @@ def write_library_packages(  # noqa: PLR0913
     exec_requires: PackageRequires,
     store: Path,
     rebuild: bool,
-) -> None:
-    """Write ``<family>_edit`` (source and manifest), then ``<family>``, each staged with ``package.py`` last."""
+) -> list[WrittenPackage]:
+    """Write ``<family>_edit`` (source and manifest), then ``<family>``, each staged with ``package.py`` last.
+
+    Returns the packages written; packages kept because they exist are not listed.
+    """
+    written: list[WrittenPackage] = []
     for package_family, content, with_source in (
         (family.edit_family, edit_package_content(manifest, family, version, edit_requires), True),
         (family.family, exec_package_content(manifest, family, version, exec_requires), False),
@@ -287,7 +299,9 @@ def write_library_packages(  # noqa: PLR0913
             move_into_place(staged, store / package_family / version)
         finally:
             shutil.rmtree(staged, ignore_errors=True)
+        written.append(WrittenPackage(version_dir=store / package_family / version, variant=None))
         console.print(f"  Wrote [cyan]{package_family}-{version}[/cyan]")
+    return written
 
 
 def edit_package_content(

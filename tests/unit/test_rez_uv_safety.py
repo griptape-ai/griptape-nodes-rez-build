@@ -24,6 +24,7 @@ from griptape_nodes_rez_build.rez_uv import (
     _write_package_py,
     read_package_file,
 )
+from griptape_nodes_rez_build.store import WrittenPackage
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -244,3 +245,33 @@ class TestTorchBuildGuard:
         if stops:
             assert "gpu-config" in stopped[0]
             assert ".torch_backend-cu128" in stopped[0]
+
+
+class TestWrittenForRollBack:
+    def test_new_versions_and_added_variants_are_recorded_not_existing_ones(self, tmp_path: Path) -> None:
+        compile_output = "demo==1.0\nsix==1.16.0\nshared==2.0\n"
+        # shared-2.0 exists for another platform (compiled): this build adds a variant to it.
+        other = ["platform-osx", "arch-arm64", "python-3.12"]
+        shared_dir = tmp_path / "shared" / "2.0"
+        (shared_dir / Path(*other)).mkdir(parents=True)
+        (shared_dir / "package.py").write_text(f"name = 'shared'\nvariants = [{other!r}]\n", encoding="utf-8")
+        # six-1.16.0 is already installed for this machine: not touched, not recorded.
+        six_dir = tmp_path / "six" / "1.16.0"
+        (six_dir / "python-3.12").mkdir(parents=True)
+        (six_dir / "package.py").write_text("name = 'six'\nvariants = [['python-3.12']]\n", encoding="utf-8")
+
+        def run(cmd: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if "compile" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout=compile_output, stderr="")
+            target = Path(cmd[cmd.index("--target") + 1])
+            name, version = cmd[cmd.index("--target") + 2].split("==")
+            _fake_wheel(target, name, version, tag="cp312-cp312-linux" if name == "shared" else "py3-none-any")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with patch.object(rez_uv.subprocess, "run", side_effect=run):
+            report = rez_uv.install(["demo"], packages_dir=tmp_path, python_version="3.12", uv_cmd="uv")
+
+        assert WrittenPackage(version_dir=tmp_path / "demo" / "1.0", variant=None) in report.written
+        linux = ["platform-linux", "arch-x86_64", "python-3.12"]
+        assert WrittenPackage(version_dir=shared_dir, variant=linux) in report.written
+        assert all(item.version_dir != six_dir for item in report.written)

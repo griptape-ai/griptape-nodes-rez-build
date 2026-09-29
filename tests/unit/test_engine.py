@@ -23,6 +23,7 @@ from griptape_nodes_rez_build.engine import (
 )
 from griptape_nodes_rez_build.errors import BuildError
 from griptape_nodes_rez_build.rez_uv import InstallReport, ResolvedPackage
+from griptape_nodes_rez_build.store import WrittenPackage
 from tests.unit.conftest import FakeRezTools, failed, ok
 from tests.unit.rex_fake import run_commands
 
@@ -229,3 +230,38 @@ class TestBuildEngine:
             pytest.raises(BuildError, match="conflict"),
         ):
             build_engine(self._options(tmp_path, fake_tools))
+
+    def test_failed_check_removes_what_this_build_wrote(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
+        store = tmp_path / "store"
+        new_dependency = store / "httpx" / "0.28.1"
+        (new_dependency / "python-3.12").mkdir(parents=True)
+        (new_dependency / "package.py").write_text("name = 'httpx'\n", encoding="utf-8")
+        existing = store / "pydantic" / "2.12.0" / "package.py"
+        existing.parent.mkdir(parents=True)
+        existing.write_text("name = 'pydantic'\n", encoding="utf-8")
+        report = self._report()
+        report.written.append(WrittenPackage(version_dir=new_dependency, variant=None))
+        fake_tools.env_results = [failed("package not found: griptape_nodes-0.99.0")]
+
+        with patch.object(engine, "install_packages", return_value=report), pytest.raises(BuildError) as raised:
+            build_engine(self._options(tmp_path, fake_tools))
+
+        message = str(raised.value)
+        assert "so a plain rerun builds them again" in message
+        assert "griptape_nodes_engine-0.103.0" in message
+        assert not (store / "griptape_nodes_engine" / "0.103.0").exists()
+        assert not new_dependency.exists()
+        # Not written by this build: kept.
+        assert existing.is_file()
+
+    def test_failed_check_on_kept_packages_says_to_rebuild(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
+        package_file = tmp_path / "store" / "griptape_nodes_engine" / "0.103.0" / "package.py"
+        package_file.parent.mkdir(parents=True)
+        package_file.write_text("# another build's\n", encoding="utf-8")
+        fake_tools.env_results = [failed("conflict")]
+        with (
+            patch.object(engine, "install_packages", return_value=self._report()),
+            pytest.raises(BuildError, match="Pass --rebuild"),
+        ):
+            build_engine(self._options(tmp_path, fake_tools))
+        assert package_file.is_file()

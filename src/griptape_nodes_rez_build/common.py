@@ -12,6 +12,7 @@ from griptape_nodes_rez_build import rez_uv
 from griptape_nodes_rez_build.console import console
 from griptape_nodes_rez_build.errors import BuildError, ResolveError
 from griptape_nodes_rez_build.package_py import FALLBACK_PLATFORM_KEY
+from griptape_nodes_rez_build.store import WrittenPackage, roll_back
 from griptape_nodes_rez_build.versions import SpecifierConversionError
 
 if TYPE_CHECKING:
@@ -146,6 +147,28 @@ def package_requires(
             "Fix the specifier; a guessed range could resolve to versions it rules out."
         )
         raise BuildError(msg) from exc
+
+
+def rolled_back(failure: BuildError, written: list[WrittenPackage]) -> BuildError:
+    """Remove what this build wrote after its check failed, and say so in the error.
+
+    Existing packages are kept on a rerun unless --rebuild, so leaving the unresolvable ones
+    would have the next run reuse them. Only what this run created goes: versions it created,
+    and variants it added to versions other builds created.
+    """
+    removed = roll_back(written)
+    if not removed:
+        note = (
+            "Nothing was removed: every package involved was already in the store before this build. "
+            "Pass --rebuild to replace them."
+        )
+    else:
+        shown = "\n".join(f"  - {label}" for label in removed[:20])
+        more = ""
+        if len(removed) > 20:  # noqa: PLR2004 - enough to recognise the build, not the whole store
+            more = f"\n  ... and {len(removed) - 20} more"
+        note = f"Removed the {len(removed)} package(s) this build wrote, so a plain rerun builds them again:\n{shown}{more}"
+    return BuildError(f"{failure}\n{note}")
 
 
 def _split_by_platform(requirements: list[rez_uv.ParsedRequirement]) -> PackageRequires:

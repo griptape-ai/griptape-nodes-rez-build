@@ -20,6 +20,9 @@ The engine contains no rez code. It reads what these packages set: `GTN_LIBRARY_
 `GTN_LIBRARY_WORKER_REQUESTS`, `GTN_CONFIG_LIBRARY__DEPENDENCY_SOURCE`, and
 `GTN_CONFIG_WORKER__COMMAND_PREFIX`.
 
+The guides in [`docs/`](docs/overview.md) walk through deploying, configuring, choosing libraries,
+GPU builds per machine, and releasing. This page is the command reference.
+
 ## Requirements
 
 - rez 3 (tested with 3.4.0), for its tools (`rez`, `rez-env`, `rez-config`, `rez-search`). Pass the folder with

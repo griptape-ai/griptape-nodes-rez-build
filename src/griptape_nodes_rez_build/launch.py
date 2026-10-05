@@ -4,13 +4,14 @@
 chosen libraries' ``_edit`` packages together, and the package's ``commands()`` configure the
 engine for that environment:
 
-- ``GTN_CONFIG_LIBRARY__DEPENDENCY_SOURCE=environment``: the engine loads exactly the libraries
-  the ``_edit`` packages publish in ``GTN_LIBRARY_PATHS`` and never builds virtualenvs.
+- ``GTN_CONFIG_LIBRARY__PROVISIONED_BY=environment``: the environment, not the engine, provides
+  the libraries, so the engine loads exactly the ones the ``_edit`` packages publish in
+  ``GTN_LIBRARY_PATHS`` and never builds virtualenvs.
 - ``--config-file``: appended to ``REZ_CONFIG_FILE``, after the studio's configuration, so the
   worker's ``rez env`` reads it too. ``--testing-store`` is recorded in the package
   (``testing_stores``) and sets nothing: the engine reads no rez settings, so rez itself has to
   find the store through ``--config-file``.
-- ``--allow-sandbox``: ``GTN_CONFIG_LIBRARY__ENVIRONMENT_ALLOWS_SANDBOX=true``, so the engine also
+- ``--allow-sandbox``: ``GTN_CONFIG_LIBRARY__SANDBOX_ENABLED=true``, so the engine also
   loads the sandbox library in the orchestrator (its imports must come from this environment; no
   virtualenv is built). Everything else stays as strict as environment mode is without it.
 - ``GTN_CONFIG_WORKER__COMMAND_PREFIX``: each library's worker starts inside
@@ -61,10 +62,10 @@ LAUNCH_FAMILY = "griptape_launch"
 REZ_PLATFORMS = ("linux", "osx", "windows")
 DEFAULT_LAUNCH_VERSION = "1.0.0"
 
-ENV_DEPENDENCY_SOURCE = "GTN_CONFIG_LIBRARY__DEPENDENCY_SOURCE"
+ENV_PROVISIONED_BY = "GTN_CONFIG_LIBRARY__PROVISIONED_BY"
 ENV_COMMAND_PREFIX = "GTN_CONFIG_WORKER__COMMAND_PREFIX"
-ENV_ALLOWS_SANDBOX = "GTN_CONFIG_LIBRARY__ENVIRONMENT_ALLOWS_SANDBOX"
-DEPENDENCY_SOURCE_ENVIRONMENT = "environment"
+ENV_SANDBOX_ENABLED = "GTN_CONFIG_LIBRARY__SANDBOX_ENABLED"
+PROVISIONED_BY_ENVIRONMENT = "environment"
 ENGINE_VERSION_PLACEHOLDER = "{engine_version}"
 LIBRARY_REQUEST_PLACEHOLDER = "{library_request}"
 PYTHON_VERSION_PLACEHOLDER = "{python_version}"
@@ -75,7 +76,7 @@ _PLATFORM_KEYS = {"darwin": "osx", "win32": "windows"}
 _VALIDATE_SCRIPT = """\
 import json, os, subprocess, sys, tempfile
 import griptape_nodes, griptape_nodes_app
-names = ("GTN_LIBRARY_PATHS", "GTN_LIBRARY_WORKER_REQUESTS", "GTN_CONFIG_LIBRARY__DEPENDENCY_SOURCE", "GTN_CONFIG_WORKER__COMMAND_PREFIX", "GTN_CONFIG_LIBRARY__ENVIRONMENT_ALLOWS_SANDBOX")
+names = ("GTN_LIBRARY_PATHS", "GTN_LIBRARY_WORKER_REQUESTS", "GTN_CONFIG_LIBRARY__PROVISIONED_BY", "GTN_CONFIG_WORKER__COMMAND_PREFIX", "GTN_CONFIG_LIBRARY__SANDBOX_ENABLED")
 found = {name: os.environ.get(name, "") for name in names}
 found["griptape_nodes"] = griptape_nodes.__file__
 found["griptape_nodes_app"] = griptape_nodes_app.__file__
@@ -270,7 +271,7 @@ def launch_package_content(package: LaunchPackage) -> str:
     if package.allow_sandbox:
         sandbox_lines = (
             "    # --allow-sandbox: the sandbox library loads in the orchestrator, its imports from this environment.\n"
-            f"    setenv({ENV_ALLOWS_SANDBOX!r}, 'true')\n"
+            f"    setenv({ENV_SANDBOX_ENABLED!r}, 'true')\n"
         )
     stop_message = f"{LAUNCH_FAMILY} is not set up for this platform (set up for: {platforms}). Platform: "
 
@@ -293,7 +294,7 @@ def commands():
     if system.platform not in settings:
         stop({stop_message!r} + system.platform)
     platform_settings = settings[system.platform]
-    setenv({ENV_DEPENDENCY_SOURCE!r}, {DEPENDENCY_SOURCE_ENVIRONMENT!r})
+    setenv({ENV_PROVISIONED_BY!r}, {PROVISIONED_BY_ENVIRONMENT!r})
 {sandbox_lines}    # literal(): the engine fills the {{...}} placeholders, rez must leave them alone.
     setenv({ENV_COMMAND_PREFIX!r}, literal(platform_settings['command_prefix']))
     if 'config_file' in platform_settings:
@@ -482,13 +483,15 @@ def _launch_environment_problems(
 ) -> list[str]:
     """What is wrong with the environment the launch package gave the check's python."""
     problems: list[str] = []
-    if found[ENV_DEPENDENCY_SOURCE] != DEPENDENCY_SOURCE_ENVIRONMENT:
-        problems.append(f"{ENV_DEPENDENCY_SOURCE} is {found[ENV_DEPENDENCY_SOURCE]!r}")
+    if found[ENV_PROVISIONED_BY] != PROVISIONED_BY_ENVIRONMENT:
+        problems.append(f"{ENV_PROVISIONED_BY} is {found[ENV_PROVISIONED_BY]!r}")
     expected_sandbox = ""
     if package.allow_sandbox:
         expected_sandbox = "true"
-    if found.get(ENV_ALLOWS_SANDBOX, "") != expected_sandbox:
-        problems.append(f"{ENV_ALLOWS_SANDBOX} is {found.get(ENV_ALLOWS_SANDBOX, '')!r}, expected {expected_sandbox!r}")
+    if found.get(ENV_SANDBOX_ENABLED, "") != expected_sandbox:
+        problems.append(
+            f"{ENV_SANDBOX_ENABLED} is {found.get(ENV_SANDBOX_ENABLED, '')!r}, expected {expected_sandbox!r}"
+        )
     expected_prefix = json.dumps(package.per_platform[platform].command_prefix)
     if found[ENV_COMMAND_PREFIX] != expected_prefix:
         problems.append(f"{ENV_COMMAND_PREFIX} is {found[ENV_COMMAND_PREFIX]!r}, expected {expected_prefix!r}")

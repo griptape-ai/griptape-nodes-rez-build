@@ -2,14 +2,14 @@
 name: griptape-nodes-rez-build
 description: >-
   Running Griptape Nodes under Rez with griptape-nodes-rez-build: the engine has no
-  Rez code and reads library.dependency_source = "environment",
+  Rez code and reads library.provisioned_by = "environment",
   worker.command_prefix, GTN_LIBRARY_PATHS and GTN_LIBRARY_WORKER_REQUESTS; Rez
   resolves the engine and every library's edit-time package before gtn starts; the
   griptape-nodes-rez command (build-engine / build-library / write-launch /
   gpu-config) writes the engine package with version ranges, <family>_edit and
   <family> library packages, the griptape_launch package, and prints the
   per-machine .torch_backend implicit that the torch packages' guard requires;
-  optional sandbox opt-in (library.environment_allows_sandbox,
+  optional sandbox opt-in (library.sandbox_enabled,
   write-launch --allow-sandbox, Refresh Sandbox). Use when setting up, debugging,
   or extending a Rez deployment of Griptape Nodes, or working on this repository.
 license: Apache-2.0
@@ -32,7 +32,7 @@ Rez builds the whole editor environment **before** the engine starts:
 (which requires the `gtn` app and the editor at exact versions) and `<family>_edit==<v>` per library.
 Each `_edit` package's `commands()` put the library on `PYTHONPATH` and publish it in
 `GTN_LIBRARY_PATHS` and `GTN_LIBRARY_WORKER_REQUESTS`. The launch package sets
-`library.dependency_source = "environment"` and `worker.command_prefix`. The engine then builds no
+`library.provisioned_by = "environment"` and `worker.command_prefix`. The engine then builds no
 venvs, downloads and updates nothing, makes no Rez calls, and loads only libraries in
 `GTN_LIBRARY_PATHS`. Each library's worker starts as
 `<rez> env --norc griptape_nodes_engine==<v> python-<engine python> <family>==<v> -- <absolute python> -m griptape_nodes_app engine ...`,
@@ -46,9 +46,9 @@ and `worker_manager.py`. User-facing description: `docs/guides/managed_environme
 
 | Name | Kind | Values | Override |
 |:--|:--|:--|:--|
-| `library.dependency_source` | setting | `"venv"` (default), `"environment"` | `GTN_CONFIG_LIBRARY__DEPENDENCY_SOURCE` |
+| `library.provisioned_by` | setting | `"engine"` (default), `"environment"` | `GTN_CONFIG_LIBRARY__PROVISIONED_BY` |
 | `worker.command_prefix` | setting | list of strings, default `[]` | `GTN_CONFIG_WORKER__COMMAND_PREFIX` (JSON list) |
-| `library.environment_allows_sandbox` | setting | `false` (default), `true` | `GTN_CONFIG_LIBRARY__ENVIRONMENT_ALLOWS_SANDBOX` |
+| `library.sandbox_enabled` | setting | `true`, `false`, unset (default: on when the engine provisions, off in environment mode) | `GTN_CONFIG_LIBRARY__SANDBOX_ENABLED` |
 | `GTN_LIBRARY_PATHS` | env var | `os.pathsep`-separated manifest paths or folders to search | |
 | `GTN_LIBRARY_WORKER_REQUESTS` | env var | `os.pathsep`-separated `<manifest name>=<request>` | |
 
@@ -59,14 +59,16 @@ and `worker_manager.py`. User-facing description: `docs/guides/managed_environme
   libraries"; `libraries_to_download` is ignored; download/update/switch/sync requests fail saying
   the environment manages libraries; update checks report no update ("provided by the
   environment") without contacting git; the sandbox is not scanned and sandbox nodes from a file
-  are refused (unless `environment_allows_sandbox`, below); no `.venv` or `.venv-exec` is created or
+  are refused (unless `sandbox_enabled` is true, below); no `.venv` or `.venv-exec` is created or
   reused; the user's config file is not pruned. A misspelled value is logged and ignored.
 - `library_dependency` in environment mode is satisfied only by a library in `GTN_LIBRARY_PATHS`,
   matched by the dependency's repository name against the folders in each loaded manifest's path
   (case-insensitive, `-` and `_` alike). Packages from the build tool keep the source in
   `python/<repo or folder name>/` for this.
-- `library.environment_allows_sandbox` (only matters in environment mode; any letter case, other
-  values logged and ignored so the sandbox stays refused): the Sandbox Library
+- `library.sandbox_enabled` applies in both modes. Unset: on when the engine provisions libraries,
+  off in environment mode; `false` turns it off when the engine provisions too. Any letter case;
+  other values are logged and ignored, leaving the default. Set to `true` in environment mode: the
+  Sandbox Library
   (`sandbox_library_directory`) is scanned and loaded in the orchestrator, sandbox nodes can be
   added (`RegisterSandboxNodeFromSourceRequest`), and it is listed in library metadata. No venv is
   built for it: it runs in the orchestrator, whose environment is the engine plus each library's
@@ -76,8 +78,7 @@ and `worker_manager.py`. User-facing description: `docs/guides/managed_environme
   Everything else stays refused.
 - `ReloadSandboxLibraryRequest` (success/failure results) reloads only the sandbox: environment
   libraries stay loaded and their workers keep running. Nodes already in a workflow keep their old
-  class until recreated. In environment mode without the opt-in it fails saying the environment
-  does not include a sandbox library.
+  class until recreated. With the sandbox off it fails with an artist-readable reason.
 - Editor in environment mode: every "Refresh Libraries" entry point is disabled with the tooltip
   "Libraries come from the environment the engine was started in. Relaunch the engine to pick up
   library changes." With the sandbox opt-in the button reads "Refresh Sandbox" and keeps the
@@ -92,7 +93,7 @@ and `worker_manager.py`. User-facing description: `docs/guides/managed_environme
   `python-{python_version}` for this.
 - A library with no request entry: `"environment"` mode does not start its worker (nodes stay
   editable; running one says the environment does not say which packages its worker needs); never
-  runs unprefixed. `"venv"` mode runs it without the prefix.
+  runs unprefixed. When the engine provisions libraries (`"engine"`), it runs without the prefix.
 - The worker gets the engine's startup environment plus `GTN_ENGINE_ID`,
   `GTN_ORCHESTRATOR_ENGINE_ID`, `PYTHONUNBUFFERED`, and the static server address; the engine copies
   nothing else and changes nothing, so the prefix tool decides the rest.
@@ -144,13 +145,13 @@ griptape-nodes-rez gpu-config    [--local-packages-path PATH ...]
 - **`write-launch`**: `griptape_launch` requiring `griptape_nodes_engine==<v>` and
   `<family>_edit==<v>` (newest in store or on the search path when unversioned); zero `--library`
   writes an engine-only package with a warning. `commands()` per `system.platform` (stop on an
-  unconfigured one): `GTN_CONFIG_LIBRARY__DEPENDENCY_SOURCE=environment`,
+  unconfigured one): `GTN_CONFIG_LIBRARY__PROVISIONED_BY=environment`,
   `GTN_CONFIG_WORKER__COMMAND_PREFIX=["<tools>/rez", "env", "--norc",
   "griptape_nodes_engine=={engine_version}", "python-{python_version}", "{library_request}", "--"]` via `literal()`, `--set`
   values on every platform, `--config-file` appended to `REZ_CONFIG_FILE` after the studio's value
   (how a testing setup lets workers find a local store: a rezconfig with
   `packages_path = ModifyList(prepend=[...])`). `--allow-sandbox` (off by default) adds
-  `GTN_CONFIG_LIBRARY__ENVIRONMENT_ALLOWS_SANDBOX=true` on every platform. `--testing-store` is only
+  `GTN_CONFIG_LIBRARY__SANDBOX_ENABLED=true` on every platform. `--testing-store` is only
   recorded as `testing_stores` and sets nothing; the tool warns if it is given without a config
   file. `--tools` paths absolute; `--version` defaults to newest + 1 patch; replacing needs
   `--rebuild`. The check resolves the package and each library's worker request, and names every

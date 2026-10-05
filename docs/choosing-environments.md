@@ -8,10 +8,10 @@ package list.
 ## What every environment needs
 
 1. **The packages:** `griptape_nodes_engine` and the `<family>_edit` package of each library.
-2. **The engine settings** from [Configuration](configuration.md): `library.dependency_source` set to
+2. **The engine settings** from [Configuration](configuration.md): `library.provisioned_by` set to
    `"environment"`, and `worker.command_prefix` for libraries that run workers.
    (`GTN_LIBRARY_PATHS` and `GTN_LIBRARY_WORKER_REQUESTS` come from the `_edit` packages
-   themselves.) Optionally, `library.environment_allows_sandbox` to let artists keep a sandbox
+   themselves.) Optionally, `library.sandbox_enabled` set to `true` to let artists keep a sandbox
    library; environment mode refuses it otherwise.
 3. **The project's Griptape Nodes configuration**, usually by setting `XDG_CONFIG_HOME` to the folder
    holding `griptape_nodes/griptape_nodes_config.json` (with `websocket_direct` enabled for the
@@ -65,14 +65,14 @@ requires:
 Then the engine settings have to come from somewhere else:
 
 - **Environment variables set by the launcher,** if it can set them:
-  `GTN_CONFIG_LIBRARY__DEPENDENCY_SOURCE=environment` and `GTN_CONFIG_WORKER__COMMAND_PREFIX` as a
-  JSON list, plus `GTN_CONFIG_LIBRARY__ENVIRONMENT_ALLOWS_SANDBOX=true` if artists may keep a sandbox
+  `GTN_CONFIG_LIBRARY__PROVISIONED_BY=environment` and `GTN_CONFIG_WORKER__COMMAND_PREFIX` as a
+  JSON list, plus `GTN_CONFIG_LIBRARY__SANDBOX_ENABLED=true` if artists may keep a sandbox
   library (see [Allowing a sandbox library](configuration.md#allowing-a-sandbox-library)).
 - **Or the project's `griptape_nodes_config.json`:**
 
   ```json
   {
-    "library": { "dependency_source": "environment", "environment_allows_sandbox": false },
+    "library": { "provisioned_by": "environment", "sandbox_enabled": false },
     "worker": {
       "command_prefix": ["rez", "env", "--norc", "griptape_nodes_engine=={engine_version}", "python-{python_version}", "{library_request}", "--"]
     }

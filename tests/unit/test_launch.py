@@ -78,7 +78,7 @@ class TestContent:
     def test_settings_for_this_platform(self) -> None:
         run = run_commands(launch_package_content(_package()), platform="osx")
 
-        assert run.environ["GTN_CONFIG_LIBRARY__DEPENDENCY_SOURCE"] == "environment"
+        assert run.environ["GTN_CONFIG_LIBRARY__PROVISIONED_BY"] == "environment"
         prefix = json.loads(run.environ["GTN_CONFIG_WORKER__COMMAND_PREFIX"])
         assert prefix == [
             "/opt/rez/bin/rez/rez",
@@ -130,12 +130,12 @@ class TestContent:
     @pytest.mark.parametrize("platform", ["osx", "windows"])
     def test_allow_sandbox_is_set_on_every_platform(self, platform: str) -> None:
         run = run_commands(launch_package_content(_package(allow_sandbox=True)), platform=platform)
-        assert run.environ["GTN_CONFIG_LIBRARY__ENVIRONMENT_ALLOWS_SANDBOX"] == "true"
-        assert run.environ["GTN_CONFIG_LIBRARY__DEPENDENCY_SOURCE"] == "environment"
+        assert run.environ["GTN_CONFIG_LIBRARY__SANDBOX_ENABLED"] == "true"
+        assert run.environ["GTN_CONFIG_LIBRARY__PROVISIONED_BY"] == "environment"
 
     def test_sandbox_setting_absent_by_default(self) -> None:
         run = run_commands(launch_package_content(_package()), platform="osx")
-        assert "GTN_CONFIG_LIBRARY__ENVIRONMENT_ALLOWS_SANDBOX" not in run.environ
+        assert "GTN_CONFIG_LIBRARY__SANDBOX_ENABLED" not in run.environ
 
     def test_unconfigured_platform_stops(self) -> None:
         with pytest.raises(Stopped, match="set up for: osx, windows"):
@@ -229,7 +229,7 @@ class TestWriteLaunch:
         write_launch(self._options(tmp_path, None, print_only=True, allow_sandbox=True))
 
         captured = capsys.readouterr()
-        assert "setenv('GTN_CONFIG_LIBRARY__ENVIRONMENT_ALLOWS_SANDBOX', 'true')" in captured.out
+        assert "setenv('GTN_CONFIG_LIBRARY__SANDBOX_ENABLED', 'true')" in captured.out
         assert "Sandbox: allowed (--allow-sandbox)" in " ".join(captured.err.split())
 
     def test_sandbox_is_off_by_default(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -239,7 +239,7 @@ class TestWriteLaunch:
         write_launch(self._options(tmp_path, None, print_only=True))
 
         captured = capsys.readouterr()
-        assert "ENVIRONMENT_ALLOWS_SANDBOX" not in captured.out
+        assert "SANDBOX_ENABLED" not in captured.out
         assert "Sandbox: not allowed" in " ".join(captured.err.split())
 
     def test_relative_tools_path_is_refused(self, tmp_path: Path) -> None:
@@ -317,7 +317,7 @@ class TestValidateLaunch:
         found: dict[str, object] = {
             "GTN_LIBRARY_PATHS": str(store / "rez_test_edit/0.1.0/python/rez-test/griptape_nodes_library.json"),
             "GTN_LIBRARY_WORKER_REQUESTS": "Rez Test Library=rez_test==0.1.0",
-            "GTN_CONFIG_LIBRARY__DEPENDENCY_SOURCE": "environment",
+            "GTN_CONFIG_LIBRARY__PROVISIONED_BY": "environment",
             "GTN_CONFIG_WORKER__COMMAND_PREFIX": json.dumps(package.per_platform[platform].command_prefix),
             "griptape_nodes": str(store / "griptape_nodes_engine/0.103.0/python/griptape_nodes/__init__.py"),
             "griptape_nodes_app": str(store / "griptape_nodes/0.99.0/python/griptape_nodes_app/__init__.py"),
@@ -389,11 +389,11 @@ class TestValidateLaunch:
     def test_check_expects_the_sandbox_setting_when_allowed(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
         package, platform = self._this_platform_package(allow_sandbox=True)
         fake_tools.env_results = [ok(self._found(tmp_path, package, platform))]
-        with pytest.raises(BuildError, match="ENVIRONMENT_ALLOWS_SANDBOX is '', expected 'true'"):
+        with pytest.raises(BuildError, match="SANDBOX_ENABLED is '', expected 'true'"):
             validate_launch(fake_tools, package, store=tmp_path)
 
         fake_tools.env_results = [
-            ok(self._found(tmp_path, package, platform, GTN_CONFIG_LIBRARY__ENVIRONMENT_ALLOWS_SANDBOX="true"))
+            ok(self._found(tmp_path, package, platform, GTN_CONFIG_LIBRARY__SANDBOX_ENABLED="true"))
         ]
         validate_launch(fake_tools, package, store=tmp_path)
 

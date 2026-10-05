@@ -9,7 +9,8 @@ studios: the engine (with the `gtn` app and the prebuilt editor), node libraries
 package and a full package each), the `griptape_launch` package artists start Griptape Nodes
 with, and a per-machine rezconfig snippet for torch builds. The engine itself contains no rez
 code; it reads `GTN_LIBRARY_PATHS`, `GTN_LIBRARY_WORKER_REQUESTS`,
-`library.dependency_source`, and `worker.command_prefix`, which these packages set.
+`library.provisioned_by`, `library.sandbox_enabled`, and `worker.command_prefix`, which these
+packages set.
 
 Those names are the contract with the engine. A rename has to land in the engine first.
 

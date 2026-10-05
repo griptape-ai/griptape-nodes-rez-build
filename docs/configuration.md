@@ -12,19 +12,20 @@ page describes them as a Rez setup uses them.
 
 | Setting | Values | Environment override |
 |:--|:--|:--|
-| `library.dependency_source` | `"venv"` (default) or `"environment"` | `GTN_CONFIG_LIBRARY__DEPENDENCY_SOURCE` |
+| `library.provisioned_by` | `"engine"` (default) or `"environment"` | `GTN_CONFIG_LIBRARY__PROVISIONED_BY` |
 | `worker.command_prefix` | A list of strings, default `[]` | `GTN_CONFIG_WORKER__COMMAND_PREFIX`, as a JSON list |
-| `library.environment_allows_sandbox` | `false` (default) or `true` | `GTN_CONFIG_LIBRARY__ENVIRONMENT_ALLOWS_SANDBOX` |
+| `library.sandbox_enabled` | `true`, `false`, or unset (default: on when the engine provisions libraries, off when the environment does) | `GTN_CONFIG_LIBRARY__SANDBOX_ENABLED` |
 
 Like other engine settings, they can live in `griptape_nodes_config.json` or come from the
 `GTN_CONFIG_*` overrides. A launch package uses the overrides.
 
-### `library.dependency_source`
+### `library.provisioned_by`
 
-With `"venv"`, the engine behaves as it always has: it builds a virtual environment for each
-library and downloads libraries it is asked for.
+This says who provisions the libraries and their Python packages. With `"engine"`, the engine
+behaves as it always has: it builds a virtual environment for each library and downloads libraries
+it is asked for.
 
-With `"environment"`:
+With `"environment"`, the environment the engine was started in provides them:
 
 - Only the libraries in `GTN_LIBRARY_PATHS` load. Every other configured library (entries in
   `libraries_to_register`, and the Sandbox Library) is listed with the problem "This library was not
@@ -36,7 +37,7 @@ With `"environment"`:
 - Checking a library for updates reports no update and says updates come from the environment,
   without contacting its git remote.
 - The Sandbox Library is neither scanned nor loaded, and adding a sandbox node from a file fails with
-  the same message, unless the studio allows a sandbox (see
+  the same message, unless the studio enables the sandbox (see
   [Allowing a sandbox library](#allowing-a-sandbox-library)).
 - No `.venv` or `.venv-exec` folder is created, and none left from an earlier run is used.
 - A library's `library_dependency` is satisfied only by a library in `GTN_LIBRARY_PATHS`, never by a
@@ -50,19 +51,20 @@ With `"environment"`:
   changes. With a sandbox allowed, the button reads **Refresh Sandbox** instead (see below).
 
 A misspelled value is reported in the engine log and ignored, rather than quietly falling back to
-`"venv"`. A dependency the environment is missing shows up as an ordinary import error for that
+`"engine"`. A dependency the environment is missing shows up as an ordinary import error for that
 library.
 
 ### Allowing a sandbox library
 
 Environment mode is strict by default: only the libraries the environment publishes load. A studio
 that wants artists to develop their own nodes can let one more library in, the Sandbox Library (the
-folder in **Settings → Library → Sandbox Settings**), with `library.environment_allows_sandbox`:
+folder in **Settings → Library → Sandbox Settings**), by setting `library.sandbox_enabled` to
+`true`:
 
 - With `write-launch --allow-sandbox`, the launch package sets
-  `GTN_CONFIG_LIBRARY__ENVIRONMENT_ALLOWS_SANDBOX=true` on every platform.
+  `GTN_CONFIG_LIBRARY__SANDBOX_ENABLED=true` on every platform.
 - Without a launch package, set the same variable in the launcher profile, or
-  `"library": {"environment_allows_sandbox": true}` in the project's `griptape_nodes_config.json`
+  `"library": {"sandbox_enabled": true}` in the project's `griptape_nodes_config.json`
   (see [Choosing environments](choosing-environments.md)).
 
 Then:
@@ -86,9 +88,11 @@ Then:
   the workflow, so its sandbox nodes use the new code. Changes to the environment's own libraries
   still need a relaunch.
 
-The setting has no effect when `library.dependency_source` is `"venv"`, where the sandbox always
-works. It accepts `true` or `false` in any letter case; any other value from the environment
-variable is reported in the engine log and ignored, which keeps the sandbox refused.
+`library.sandbox_enabled` applies in either mode: left unset, the sandbox is on when the engine
+provisions libraries and off when the environment does, and `false` turns it off even when the
+engine provisions them. It accepts `true` or `false` in any letter case; any other value from the
+environment variable is reported in the engine log and ignored, which leaves the default in place
+(so environment mode keeps the sandbox refused).
 
 ### `worker.command_prefix`
 
@@ -133,7 +137,8 @@ environment resolved.
 - **A library with no request.** With `"environment"`, a library that has no entry in
   `GTN_LIBRARY_WORKER_REQUESTS` does not start a worker. Its nodes stay editable, and running one
   says the environment does not say which packages its worker needs. It never runs without the
-  prefix. With `"venv"`, it runs without a prefix, as if none were configured.
+  prefix. When the engine provisions libraries (`"engine"`), it runs without a prefix, as if none
+  were configured.
 - **The worker's environment.** The worker receives the engine's environment as it was when the
   engine started, plus a few variables the engine sets by name (`GTN_ENGINE_ID`,
   `GTN_ORCHESTRATOR_ENGINE_ID`, `PYTHONUNBUFFERED`, and the static file server address). The engine
@@ -180,9 +185,9 @@ and stop on a platform that was not configured:
 
 | Variable | Value | From |
 |:--|:--|:--|
-| `GTN_CONFIG_LIBRARY__DEPENDENCY_SOURCE` | `environment` | always |
+| `GTN_CONFIG_LIBRARY__PROVISIONED_BY` | `environment` | always |
 | `GTN_CONFIG_WORKER__COMMAND_PREFIX` | The prefix above, with this platform's Rez tools folder, written with `literal()` so Rez leaves the placeholders for the engine | `--tools` |
-| `GTN_CONFIG_LIBRARY__ENVIRONMENT_ALLOWS_SANDBOX` | `true`, on every platform; left out otherwise, so the sandbox is refused | `--allow-sandbox` |
+| `GTN_CONFIG_LIBRARY__SANDBOX_ENABLED` | `true`, on every platform; left out otherwise, so environment mode keeps the sandbox off | `--allow-sandbox` |
 | `XDG_CONFIG_HOME` and any other variable | As given, on every platform. `XDG_CONFIG_HOME` is the folder holding the project's `griptape_nodes/griptape_nodes_config.json` | `--set NAME=VALUE` |
 | `REZ_CONFIG_FILE` | Your rezconfig appended after the studio's, so every worker's `rez env` reads it | `--config-file` (testing) |
 
@@ -217,9 +222,9 @@ and read no such files for a command.
 
 | Name | Kind | Needed | Effect |
 |:--|:--|:--|:--|
-| `library.dependency_source` | engine setting | yes, `"environment"` | No venvs, downloads, or updates; only environment libraries load |
+| `library.provisioned_by` | engine setting | yes, `"environment"` | No venvs, downloads, or updates; only environment libraries load |
 | `worker.command_prefix` | engine setting | for libraries with workers | Command placed in front of each worker's interpreter |
-| `library.environment_allows_sandbox` | engine setting | optional | Lets the Sandbox Library load in environment mode; nothing else |
+| `library.sandbox_enabled` | engine setting | optional | `true` lets the Sandbox Library load in environment mode; nothing else |
 | `GTN_LIBRARY_PATHS` | environment variable | yes | Which libraries load (first, in either mode) |
 | `GTN_LIBRARY_WORKER_REQUESTS` | environment variable | for libraries with workers | Each library's worker request |
 | `REZ_CONFIG_FILE` (your studio's) | environment variable | as today | Used as-is; a launch package's `--config-file` only appends to it |

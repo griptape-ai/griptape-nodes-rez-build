@@ -20,7 +20,7 @@ Artist:        rez env --norc griptape_launch -- gtn
                    lib_foo_edit-1.4  lib_bar_edit-2 (edit-time library packages)
                  its commands() set the engine settings below
 
-Editor:        library.dependency_source = "environment"
+Editor:        library.provisioned_by = "environment"
                libraries = GTN_LIBRARY_PATHS (published by the *_edit packages)
                no virtual environments, no downloads, no Rez calls
                (other configured libraries are listed as not provided by the environment)
@@ -74,7 +74,7 @@ Admin:         griptape-nodes-rez build-engine | build-library | write-launch | 
 
 - [Deployment](deployment.md): building the engine and libraries with `griptape-nodes-rez`, stores,
   and building from several platforms.
-- [Configuration](configuration.md): `library.dependency_source`, `worker.command_prefix`,
+- [Configuration](configuration.md): `library.provisioned_by`, `worker.command_prefix`,
   `GTN_LIBRARY_PATHS`, `GTN_LIBRARY_WORKER_REQUESTS`, the launch package, and `--norc`.
 - [Libraries](libraries.md): the `<family>_edit` and `<family>` packages, library dependencies,
   and weak references.

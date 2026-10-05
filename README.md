@@ -17,8 +17,9 @@ The command `griptape-nodes-rez` writes four kinds of packages into a package st
 | `gpu-config` | nothing: prints the rezconfig line that picks this machine's torch build |
 
 The engine contains no rez code. It reads what these packages set: `GTN_LIBRARY_PATHS`,
-`GTN_LIBRARY_WORKER_REQUESTS`, `GTN_CONFIG_LIBRARY__DEPENDENCY_SOURCE`, and
-`GTN_CONFIG_WORKER__COMMAND_PREFIX`.
+`GTN_LIBRARY_WORKER_REQUESTS`, `GTN_CONFIG_LIBRARY__PROVISIONED_BY`, and
+`GTN_CONFIG_WORKER__COMMAND_PREFIX` (plus `GTN_CONFIG_LIBRARY__SANDBOX_ENABLED` when a sandbox is
+allowed).
 
 The guides in [`docs/`](docs/overview.md) walk through deploying, configuring, choosing libraries,
 GPU builds per machine, and releasing. This page is the command reference.
@@ -139,17 +140,18 @@ given). Without `--library` the package provides the engine only, and the comman
 libraries will load. Its `commands()` pick the settings for `system.platform` and stop on a platform that was
 not given with `--tools`:
 
-- `GTN_CONFIG_LIBRARY__DEPENDENCY_SOURCE=environment`
+- `GTN_CONFIG_LIBRARY__PROVISIONED_BY=environment`: the environment, not the engine, provides the
+  libraries
 - `GTN_CONFIG_WORKER__COMMAND_PREFIX=["<tools>/rez", "env", "--norc", "griptape_nodes_engine=={engine_version}", "python-{python_version}", "{library_request}", "--"]`,
   written with `literal()` so rez leaves the placeholders for the engine to fill
 - `--set` values on every platform (`XDG_CONFIG_HOME`, for example)
-- `--allow-sandbox` (off by default): `GTN_CONFIG_LIBRARY__ENVIRONMENT_ALLOWS_SANDBOX=true` on every
+- `--allow-sandbox` (off by default): `GTN_CONFIG_LIBRARY__SANDBOX_ENABLED=true` on every
   platform. The engine then also loads the sandbox library (its `sandbox_library_directory`) in the
   editor's own process, and artists can add sandbox nodes and refresh the sandbox. No virtualenv
   is built for it: its imports must come from this launch environment, so a sandbox node needing
   a package the environment lacks fails to load. Everything else stays strict: only the libraries
   the environment publishes load, and nothing is downloaded or installed. Without the option the
-  engine refuses the sandbox in environment mode.
+  setting stays unset, and the engine keeps the sandbox off in environment mode.
 - `--config-file`: appended to `REZ_CONFIG_FILE`, after the studio's configuration, so every
   worker's `rez env` reads it too. Rez replaces an inherited variable the first time a package
   appends to it (unless the studio lists it in `parent_variables`), so the package reads the

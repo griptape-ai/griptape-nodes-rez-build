@@ -103,8 +103,9 @@ launch package, a launcher profile, or a project config. Changing libraries mean
 environment, as with any application started through Rez. See
 [Choosing environments](choosing-environments.md).
 
-Library entries in the project's `libraries_to_register` do not choose libraries here. With `library.dependency_source` set to `"environment"`, an entry that the environment
-does not provide does not load, and the library list says so.
+Library entries in the project's `libraries_to_register` do not choose libraries here. With
+`library.provisioned_by` set to `"environment"`, an entry that the environment does not provide does
+not load, and the library list says so.
 
 ### Artists' own nodes: the sandbox
 

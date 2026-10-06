@@ -139,9 +139,10 @@ griptape-nodes-rez gpu-config    [--local-packages-path PATH ...]
     `env.GTN_LIBRARY_WORKER_REQUESTS.append(literal("<manifest name>=<family>==<version>"))`.
   - `<family>`: requires `<family>_edit==<version>` plus `pip_dependencies_exec`; always written, so
     worker requests are uniform.
-  - Version: `pyproject.toml` next to the manifest (or up to four folders up), `git describe --tags`,
-    manifest `library_version`, `1.0.0`. Declared library dependencies are cloned and built first
-    unless their `_edit` package is in the store (`--rebuild` rebuilds them too). No lock pins.
+  - Version: `pyproject.toml` in the manifest's folder or up to three above (never above the git
+    root), `git describe --tags`, manifest `library_version`, `1.0.0`. Declared library dependencies
+    are cloned and built first unless their `_edit` package is in the store and resolves on this
+    machine (`--rebuild` rebuilds them too). No lock pins.
 - **`write-launch`**: `griptape_launch` requiring `griptape_nodes_engine==<v>` and
   `<family>_edit==<v>` (newest in store or on the search path when unversioned); zero `--library`
   writes an engine-only package with a warning. `commands()` per `system.platform` (stop on an

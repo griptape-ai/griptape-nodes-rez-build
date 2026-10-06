@@ -44,8 +44,9 @@ requires = ["griptape_nodes_library_diffusers_edit==0.40.1", "torch-2.7+", "diff
 - **Pip dependencies** use the version ranges from the manifest's specifiers, converted to Rez
   ranges the way `rez-pip` converts them (`>=1.26,<3` becomes `1.26+<3`). There are no pins from a
   lock file. A specifier with no Rez equivalent fails the build instead of meaning any version.
-- **The version** comes from a `pyproject.toml` next to the manifest (or up to four folders above),
-  then `git describe --tags`, then the manifest's `library_version`, then `1.0.0`.
+- **The version** comes from a `pyproject.toml` in the manifest's folder or up to three folders
+  above it (never above the git repository root), then `git describe --tags`, then the manifest's
+  `library_version`, then `1.0.0`.
 
 - The editor's environment contains only `_edit` packages, so torch and other heavy dependencies
   never enter it. This matches the edit/execution split Griptape Nodes uses with virtual

@@ -13,7 +13,7 @@ import pytest
 
 from griptape_nodes_rez_build import library, rez_uv
 from griptape_nodes_rez_build.common import PackageRequires
-from griptape_nodes_rez_build.errors import BuildError, ResolveError
+from griptape_nodes_rez_build.errors import BuildError, NoSolutionError, ResolveError
 from griptape_nodes_rez_build.library import (
     LibraryBuildOptions,
     TorchPlan,
@@ -210,9 +210,20 @@ class TestInstallDependencies:
         plan = plan_torch_passes([], ["cu118", "cu128"], platform="linux")
         plan = TorchPlan(passes=plan.passes, skip_unavailable=True)
         cu128 = InstallReport(resolved=[ResolvedPackage("torch", "2.7.0", local_version="cu128")])
-        with patch.object(library, "install_packages", side_effect=[ResolveError("no cu118 wheel"), cu128]):
+        with patch.object(library, "install_packages", side_effect=[NoSolutionError("no cu118 wheel"), cu128]):
             installed = library._install_dependencies(_manifest(tmp_path), plan, _options(tmp_path, fake_tools))
         assert installed.torch_backends == ["cu128"]
+
+    def test_all_stops_on_failures_other_than_no_solution(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
+        # A network or index failure is not "this build does not publish the pin"; skipping it would
+        # leave the store without that build while the command exits 0.
+        plan = plan_torch_passes([], ["cu118", "cu128"], platform="linux")
+        plan = TorchPlan(passes=plan.passes, skip_unavailable=True)
+        with (
+            patch.object(library, "install_packages", side_effect=ResolveError("connection reset")),
+            pytest.raises(ResolveError, match="connection reset"),
+        ):
+            library._install_dependencies(_manifest(tmp_path), plan, _options(tmp_path, fake_tools))
 
     def test_resolve_failure_without_all_stops(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
         plan = TorchPlan(passes=[library.TorchPass(backend="cu118", flags=[])], skip_unavailable=False)
@@ -258,6 +269,21 @@ class TestLibraryDependencies:
             build_library_dependencies(manifest, _options(tmp_path, fake_tools, rebuild=True))
         assert build.call_args.args[2].rebuild is True
 
+    def test_dependency_built_on_another_platform_is_built_here(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
+        # In the store from another platform's build, without this machine's variants: it does not
+        # resolve here, so it is built (keeping its packages and adding this machine's variants).
+        existing = tmp_path / "store" / "griptape_nodes_library_standard_edit" / "0.86.0" / "package.py"
+        existing.parent.mkdir(parents=True)
+        existing.write_text("", encoding="utf-8")
+        manifest = _manifest(tmp_path, library_dependencies=[LibraryDependency(self.STANDARD, required=True)])
+        fake_tools.resolve_answer = lambda _request: failed("package not found: pillow (no variant for windows)")
+
+        with patch.object(library, "build_library_from_git") as build:
+            build_library_dependencies(manifest, _options(tmp_path, fake_tools))
+
+        assert fake_tools.resolve_calls[0][0] == "griptape_nodes_library_standard_edit==0.86.0"
+        assert build.call_args.args[2].rebuild is False
+
     def test_failed_required_dependency_stops(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
         manifest = _manifest(tmp_path, library_dependencies=[LibraryDependency(self.STANDARD, required=True)])
         with (
@@ -294,17 +320,32 @@ class TestValidateLibrary:
     def test_both_packages_are_resolved_and_checked(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
         store = self._store_with_manifest(tmp_path)
         published = self._published(store, "Rez Test Library=rez_test==0.1.0")
-        fake_tools.env_results = [ok(published), ok(published)]
+        fake_tools.env_results = [ok(published)] * 4
 
         validate_library(
             fake_tools, [store], _manifest(tmp_path), FAMILY, version="0.1.0", torch_backends=["cu118", "cu128"]
         )
 
-        requests = [call.request for call in fake_tools.env_calls]
-        assert requests[0][0] == "rez_test_edit==0.1.0"
-        assert requests[1][0] == "rez_test==0.1.0"
-        # A check on a machine without implicit_packages names the build, as the guard asks.
-        assert requests[1][-1] == ".torch_backend-cu118"
+        # Every torch build is resolved for both packages, each naming its build as the guard asks
+        # on a machine without implicit_packages.
+        requests = [(call.request[0], call.request[-1]) for call in fake_tools.env_calls]
+        assert requests == [
+            ("rez_test_edit==0.1.0", ".torch_backend-cu118"),
+            ("rez_test_edit==0.1.0", ".torch_backend-cu128"),
+            ("rez_test==0.1.0", ".torch_backend-cu118"),
+            ("rez_test==0.1.0", ".torch_backend-cu128"),
+        ]
+
+    def test_a_torch_build_that_does_not_resolve_fails_the_build(
+        self, tmp_path: Path, fake_tools: FakeRezTools
+    ) -> None:
+        store = self._store_with_manifest(tmp_path)
+        published = self._published(store, "Rez Test Library=rez_test==0.1.0")
+        fake_tools.env_results = [ok(published), failed("package not found: torch-2.7+<2.8 (cu128)")]
+        with pytest.raises(BuildError, match=r"\.torch_backend-cu128"):
+            validate_library(
+                fake_tools, [store], _manifest(tmp_path), FAMILY, version="0.1.0", torch_backends=["cpu", "cu128"]
+            )
 
     def test_failed_resolve_is_a_failed_build(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
         fake_tools.env_results = [failed("package not found: tabulate-0.9+")]
@@ -411,7 +452,9 @@ class TestFailedCheckLeavesTheStoreAsItWas:
         fake_tools.env_results = [failed("package not found: something")]
         with (
             patch.object(rez_uv.subprocess, "run", side_effect=uv),
-            patch.object(rez_uv, "_current_rez_platform", return_value=("linux", "x86_64")),
+            patch.object(
+                rez_uv, "_current_rez_platform", return_value=rez_uv.RezPlatform(platform="linux", arch="x86_64")
+            ),
             patch.object(rez_uv, "find_uv_bin", return_value="uv"),
             pytest.raises(BuildError) as raised,
         ):

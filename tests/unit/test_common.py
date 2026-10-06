@@ -9,8 +9,8 @@ from unittest.mock import patch
 import pytest
 
 from griptape_nodes_rez_build import common
-from griptape_nodes_rez_build.common import check_bindings, install_packages, package_requires
-from griptape_nodes_rez_build.errors import BuildError, ResolveError
+from griptape_nodes_rez_build.common import check_bindings, install_packages, package_requires, rolled_back
+from griptape_nodes_rez_build.errors import BuildError, NoSolutionError, ResolveError
 from griptape_nodes_rez_build.rez_uv import RezInstallError
 
 if TYPE_CHECKING:
@@ -52,9 +52,18 @@ class TestInstallPackages:
         error = subprocess.CalledProcessError(1, ["uv"], stderr="No solution found when resolving dependencies:\n  x")
         with (
             patch.object(common.rez_uv, "install", side_effect=error),
-            pytest.raises(ResolveError, match="No solution"),
+            pytest.raises(NoSolutionError, match="No solution"),
         ):
             install_packages("deps", ["x"], store=tmp_path, skip_installed=True)
+
+    def test_other_uv_failures_are_not_no_solution(self, tmp_path: Path) -> None:
+        error = subprocess.CalledProcessError(1, ["uv"], stderr="error: Failed to fetch: connection reset")
+        with (
+            patch.object(common.rez_uv, "install", side_effect=error),
+            pytest.raises(ResolveError, match="connection reset") as raised,
+        ):
+            install_packages("deps", ["x"], store=tmp_path, skip_installed=True)
+        assert not isinstance(raised.value, NoSolutionError)
 
     def test_package_failures_are_listed(self, tmp_path: Path) -> None:
         error = RezInstallError(["idna==3.7 (download failed)"])
@@ -73,3 +82,14 @@ class TestBindings:
         assert "rez-bind os" in str(raised.value)
         assert "rez-bind python" in str(raised.value)
         assert "rez-bind platform" not in str(raised.value)
+
+
+class TestRolledBack:
+    def test_nothing_removed_suggests_rebuild(self) -> None:
+        error = rolled_back(BuildError("check failed"), [], rebuild=False)
+        assert "Pass --rebuild to replace them." in str(error)
+
+    def test_nothing_removed_after_rebuild_does_not_suggest_it_again(self) -> None:
+        error = rolled_back(BuildError("check failed"), [], rebuild=True)
+        assert "Nothing was removed" in str(error)
+        assert "--rebuild" not in str(error)

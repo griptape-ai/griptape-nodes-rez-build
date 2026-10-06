@@ -1,19 +1,15 @@
-"""Rez package installer backed by uv — a drop-in improvement over rez-pip.
+"""Installs pip packages and everything they depend on into a rez package store, using uv.
 
-Differences from rez-pip
--------------------------
-- Uses ``uv pip compile`` for full transitive dependency resolution (co-resolves
-  all requested packages in one call so the solver produces one consistent lock).
-- Parses uv's annotated output to build an exact direct-dependency graph; that
-  graph becomes each package's ``requires`` list rather than the incomplete
-  wheel METADATA declaration.
-- Uses ``uv pip install --no-deps --target`` to download each package's files in
-  isolation (no bundled transitive deps).
-- Generates ``package.py`` from scratch with correct, complete ``requires``.
-- Normalises all family names to lowercase+underscores, eliminating the
-  ruamel.yaml vs ruamel_yaml naming mismatch that rez-pip produces.
-- Adds one variant per platform (and per torch build) to a shared store, keeping
-  the variants other machines built.
+- ``uv pip compile`` resolves every requested package in one call, so the result is one
+  consistent set of versions.
+- uv's annotated output gives the direct dependencies of each package; they become the
+  package's ``requires`` in the ``package.py`` this module writes.
+- ``uv pip install --no-deps --target`` downloads each package's files on their own, so a
+  package's payload holds only that package.
+- Family names are pip names lowercased with underscores (``ruamel.yaml`` becomes
+  ``ruamel_yaml``).
+- Each machine adds its own variant (per platform, arch, Python, and torch build) to a shared
+  store; variants other machines built are kept.
 
 Every package is written so a reader never sees it half-built: the payload goes to a staging
 folder, is renamed into place, and ``package.py`` is written last (see ``store``).
@@ -35,13 +31,20 @@ from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from email.parser import HeaderParser
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from packaging.markers import InvalidMarker, Marker
 from uv import find_uv_bin
 
 from griptape_nodes_rez_build.package_py import FALLBACK_PLATFORM_KEY, GENERATED_HEADER, list_literal, requires_block
-from griptape_nodes_rez_build.store import PACKAGE_FILE, WrittenPackage, move_into_place, staging_dir, write_text_atomic
+from griptape_nodes_rez_build.store import (
+    PACKAGE_FILE,
+    WrittenPackage,
+    discard_retired,
+    move_into_place,
+    staging_dir,
+    write_text_atomic,
+)
 from griptape_nodes_rez_build.versions import SpecifierConversionError, rez_requirement
 
 if TYPE_CHECKING:
@@ -113,10 +116,17 @@ class ResolvedEntry:
     local_version: str | None
 
 
-def _parse_annotation_graph(stdout: str) -> tuple[list[ResolvedEntry], dict[str, set[str]]]:
+class AnnotationGraph(NamedTuple):
+    """uv's annotated ``pip compile`` output, parsed."""
+
+    pkg_list: list[ResolvedEntry]
+    requirers_of: dict[str, set[str]]
+
+
+def _parse_annotation_graph(stdout: str) -> AnnotationGraph:
     """Parse uv's annotated ``pip compile`` output.
 
-    Returns ``(pkg_list, requirers_of)`` where:
+    Returns an ``AnnotationGraph`` where:
 
     - ``pkg_list`` lists the resolved packages in resolution order, with the local
       version suffix (``+cu128``) split off the version.
@@ -160,13 +170,12 @@ def _parse_annotation_graph(stdout: str) -> tuple[list[ResolvedEntry], dict[str,
         else:
             in_via = False
 
-    return pkg_list, requirers_of
+    return AnnotationGraph(pkg_list=pkg_list, requirers_of=requirers_of)
 
 
 def resolve_full(
     packages: str | list[str],
     *,
-    extra_index_url: str | None = None,
     extra_flags: list[str] | None = None,
     python_version: str | None = None,
     uv_cmd: str | None = None,
@@ -189,9 +198,6 @@ def resolve_full(
     logger.debug("[Rez][uv] uv binary: %s", uv)
 
     cmd = [uv, "pip", "compile", "--no-header", "-", "--python-version", python_version]
-    if extra_index_url:
-        cmd += ["--extra-index-url", extra_index_url]
-        logger.debug("[Rez][uv] extra index: %s", extra_index_url)
     if extra_flags:
         cmd += extra_flags
         logger.debug("[Rez][uv] extra flags: %s", extra_flags)
@@ -206,7 +212,9 @@ def resolve_full(
 
     logger.debug("[Rez][uv] uv pip compile stdout (%d chars)", len(result.stdout))
 
-    pkg_list, requirers_of = _parse_annotation_graph(result.stdout)
+    graph = _parse_annotation_graph(result.stdout)
+    pkg_list = graph.pkg_list
+    requirers_of = graph.requirers_of
 
     # Invert requirers_of → {pkg: set_of_direct_deps}
     direct_deps_of: dict[str, set[str]] = defaultdict(set)
@@ -253,10 +261,6 @@ class WheelInfo:
     console_script_targets: dict[str, str] = field(default_factory=dict)
 
 
-def _parse_entry_points(text: str) -> list[str]:
-    return list(_parse_console_script_targets(text))
-
-
 def _parse_console_script_targets(text: str) -> dict[str, str]:
     """Console script names and their entry point targets from an entry_points.txt."""
     targets: dict[str, str] = {}
@@ -273,11 +277,18 @@ def _parse_console_script_targets(text: str) -> dict[str, str]:
     return targets
 
 
-def _detect_wheel_tag(dist_info: Path) -> tuple[bool, str]:
-    """Return ``(is_pure_python, platform_tag)`` from the WHEEL file."""
+class WheelTag(NamedTuple):
+    """What a wheel's WHEEL file says about the platforms it runs on."""
+
+    is_pure_python: bool
+    platform_tag: str
+
+
+def _detect_wheel_tag(dist_info: Path) -> WheelTag:
+    """Read whether the wheel is pure Python, and its platform tag, from the WHEEL file."""
     wheel_file = dist_info / "WHEEL"
     if not wheel_file.exists():
-        return True, "any"
+        return WheelTag(is_pure_python=True, platform_tag="any")
 
     for line in wheel_file.read_text(encoding="utf-8", errors="replace").splitlines():
         if line.lower().startswith("tag:"):
@@ -285,9 +296,9 @@ def _detect_wheel_tag(dist_info: Path) -> tuple[bool, str]:
             parts = tag.split("-")
             if len(parts) == _WHEEL_TAG_PARTS:
                 platform_tag = parts[2]
-                return platform_tag == "any", platform_tag
+                return WheelTag(is_pure_python=platform_tag == "any", platform_tag=platform_tag)
 
-    return True, "any"
+    return WheelTag(is_pure_python=True, platform_tag="any")
 
 
 def read_wheel_info(install_dir: Path, pip_name: str, version: str) -> WheelInfo:
@@ -325,7 +336,9 @@ def read_wheel_info(install_dir: Path, pip_name: str, version: str) -> WheelInfo
         console_script_targets = _parse_console_script_targets(ep_file.read_text(encoding="utf-8", errors="replace"))
     console_scripts = list(console_script_targets)
 
-    is_pure, platform_tag = _detect_wheel_tag(dist_info)
+    wheel_tag = _detect_wheel_tag(dist_info)
+    is_pure = wheel_tag.is_pure_python
+    platform_tag = wheel_tag.platform_tag
     requires_dist = msg.get_all("Requires-Dist") or []
 
     logger.debug(
@@ -356,22 +369,35 @@ def read_wheel_info(install_dir: Path, pip_name: str, version: str) -> WheelInfo
 # ---------------------------------------------------------------------------
 
 
-def _current_rez_platform() -> tuple[str, str]:
-    """Return ``(rez_platform, rez_arch)`` for the running machine."""
-    machine = os.uname().machine if hasattr(os, "uname") else "x86_64"
+class RezPlatform(NamedTuple):
+    """A machine's platform and arch, the way rez names them (``osx``, ``arm64``)."""
+
+    platform: str
+    arch: str
+
+
+def _current_rez_platform() -> RezPlatform:
+    """The rez platform and arch of the running machine."""
+    machine = "x86_64"
+    if hasattr(os, "uname"):
+        machine = os.uname().machine
     if sys.platform == "darwin":
-        return ("osx", "arm64" if machine == "arm64" else "x86_64")
+        if machine == "arm64":
+            return RezPlatform(platform="osx", arch="arm64")
+        return RezPlatform(platform="osx", arch="x86_64")
     if sys.platform.startswith("linux"):
-        return ("linux", "x86_64" if machine in ("x86_64", "amd64") else machine)
+        if machine in ("x86_64", "amd64"):
+            return RezPlatform(platform="linux", arch="x86_64")
+        return RezPlatform(platform="linux", arch=machine)
     if sys.platform == "win32":
-        return ("windows", os.environ.get("PROCESSOR_ARCHITECTURE", "AMD64"))
-    return ("linux", "x86_64")
+        return RezPlatform(platform="windows", arch=os.environ.get("PROCESSOR_ARCHITECTURE", "AMD64"))
+    return RezPlatform(platform="linux", arch="x86_64")
 
 
 def current_platform_key() -> str:
     """This machine as a ``<platform>-<arch>`` key, the way rez names it (``osx-arm64``)."""
-    rez_platform, rez_arch = _current_rez_platform()
-    return f"{rez_platform}-{rez_arch}"
+    current = _current_rez_platform()
+    return f"{current.platform}-{current.arch}"
 
 
 # The platforms studios run, as PEP 508 environment markers see them. A package's
@@ -475,12 +501,19 @@ def flags_for_torch_backend(flags: list[str] | None, backend: str) -> list[str]:
     while index < len(items):
         flag = items[index]
         name, separator, value = flag.partition("=")
-        step = 1 if separator else 2
+        # "--flag=value" is one item; "--flag value" is two.
+        step = 2
+        if separator:
+            step = 1
         if name == "--torch-backend":
             index += step
             continue
         if name in ("--extra-index-url", "--index-url"):
-            url = value if separator else (items[index + 1] if index + 1 < len(items) else "")
+            url = value
+            if not separator:
+                url = ""
+                if index + 1 < len(items):
+                    url = items[index + 1]
             if _PYTORCH_INDEX.search(url):
                 index += step
                 continue
@@ -794,15 +827,16 @@ def read_package_file(pkg_file: Path) -> PackageFile:
 
     variants = values.get("variants")
     platform_requires = values.get("platform_requires")
+    variant_list: list[list[str]] = []
+    if isinstance(variants, list):
+        variant_list = [list(variant) for variant in variants]
+    platform_requires_dict = None
+    if isinstance(platform_requires, dict):
+        platform_requires_dict = platform_requires
     return PackageFile(
-        variants=[list(variant) for variant in variants] if isinstance(variants, list) else [],
-        platform_requires=platform_requires if isinstance(platform_requires, dict) else None,
+        variants=variant_list,
+        platform_requires=platform_requires_dict,
     )
-
-
-def _read_existing_variants(pkg_file: Path) -> list[list[str]]:
-    """Read the variants list from an existing package.py, if present."""
-    return read_package_file(pkg_file).variants
 
 
 def build_variant(*, is_pure: bool, python_version: str, backend: str | None, extras: list[str]) -> list[str]:
@@ -814,8 +848,8 @@ def build_variant(*, is_pure: bool, python_version: str, backend: str | None, ex
     """
     if is_pure:
         return [f"python-{python_version}"]
-    rez_platform, rez_arch = _current_rez_platform()
-    variant = [f"platform-{rez_platform}", f"arch-{rez_arch}", f"python-{python_version}"]
+    current = _current_rez_platform()
+    variant = [f"platform-{current.platform}", f"arch-{current.arch}", f"python-{python_version}"]
     if backend is not None:
         variant.append(torch_backend_request(backend))
     return variant + extras
@@ -850,12 +884,12 @@ def _merge_variant(existing: list[list[str]], new_variant: list[str]) -> list[li
 
 def _variant_usable_here(variant: list[str], *, python_version: str, backend: str | None) -> bool:
     """Whether this machine would resolve *variant* for a package built for *backend*."""
-    rez_platform, rez_arch = _current_rez_platform()
+    current = _current_rez_platform()
     for entry in _variant_identity(variant):
         name, _, value = entry.lstrip(".").partition("-")
         expected = {
-            "platform": rez_platform,
-            "arch": rez_arch,
+            "platform": current.platform,
+            "arch": current.arch,
             "python": python_version,
             TORCH_BACKEND_EPHEMERAL: backend,
         }[name]
@@ -974,19 +1008,6 @@ def install_state(
     return STATE_ADD_VARIANT
 
 
-def is_installed(
-    pip_name: str,
-    version: str,
-    packages_dir: Path,
-    *,
-    python_version: str | None = None,
-    backend: str | None = None,
-) -> bool:
-    """Return True if this package version already has a variant this machine uses."""
-    state = install_state(pip_name, version, packages_dir, python_version=python_version, backend=backend)
-    return state == STATE_INSTALLED
-
-
 def _other_platforms(pip_name: str, version: str, packages_dir: Path) -> set[str]:
     """Platforms other than this one that an existing package version was built for (``osx/arm64``)."""
     this_platform = current_platform_key().replace("-", "/", 1)
@@ -1015,7 +1036,10 @@ def _copy_payload(install_dir: Path, payload_root: Path, console_script_targets:
             continue
         dst = python_dir / name
         if dst.exists():
-            shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+            if dst.is_dir():
+                shutil.rmtree(dst)
+            else:
+                dst.unlink()
         if src.is_dir():
             shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         else:
@@ -1109,10 +1133,9 @@ def write_rez_package(  # noqa: PLR0913
     staged = staging_dir(packages_dir / family_name, clean_version)
     try:
         _copy_payload(install_dir, staged, info.console_script_targets)
-        # A rebuilt variant replaces this machine's variant outright; roll back never restores it.
+        # A rebuilt variant sets this machine's old one aside until the build's check passes, so a
+        # failed check puts it back (see store.roll_back and store.discard_retired).
         retired = move_into_place(staged, version_dir / _variant_subpath(variant))
-        if retired is not None:
-            shutil.rmtree(retired, ignore_errors=True)
     finally:
         shutil.rmtree(staged, ignore_errors=True)
     _write_package_py(
@@ -1123,7 +1146,9 @@ def write_rez_package(  # noqa: PLR0913
         variant=variant,
         platform_requires=platform_requires,
     )
-    return WrittenPackage(version_dir=version_dir, variant=variant, previous_package_file=previous_package_file)
+    return WrittenPackage(
+        version_dir=version_dir, variant=variant, previous_package_file=previous_package_file, retired=retired
+    )
 
 
 def _install_one(  # noqa: PLR0913
@@ -1131,7 +1156,6 @@ def _install_one(  # noqa: PLR0913
     *,
     uv: str,
     packages_dir: Path,
-    extra_index_url: str | None,
     extra_flags: list[str] | None,
     python_version: str,
     resolved_versions: dict[str, str] | None = None,
@@ -1150,7 +1174,9 @@ def _install_one(  # noqa: PLR0913
         tmp = Path(tmpdir)
 
         # A local version pins the exact build uv resolved (torch 2.7.0+cu128, not +cu118).
-        requested = f"{pkg.version}+{pkg.local_version}" if pkg.local_version else pkg.version
+        requested = pkg.version
+        if pkg.local_version:
+            requested = f"{pkg.version}+{pkg.local_version}"
         dl_cmd = [
             uv,
             "pip",
@@ -1160,8 +1186,6 @@ def _install_one(  # noqa: PLR0913
             str(tmp),
             f"{pkg.pip_name}=={requested}",
         ]
-        if extra_index_url:
-            dl_cmd += ["--extra-index-url", extra_index_url]
         if extra_flags:
             dl_cmd += extra_flags
 
@@ -1282,8 +1306,8 @@ class InstallReport:
     other_platforms: set[str] = field(default_factory=set)
     # Everything the resolve chose, including provided packages the caller builds itself.
     resolved: list[ResolvedPackage] = field(default_factory=list)
-    # What this install created, for rolling back a build whose check fails. A variant rebuilt
-    # in place (--rebuild) is not listed: it existed before this install.
+    # What this install wrote, for rolling back a build whose check fails. A variant rebuilt in
+    # place (--rebuild) is listed with the old variant it set aside, which roll back puts back.
     written: list[WrittenPackage] = field(default_factory=list)
 
     @property
@@ -1305,7 +1329,6 @@ def install(  # noqa: PLR0913
     packages: str | list[str],
     *,
     packages_dir: Path,
-    extra_index_url: str | None = None,
     extra_flags: list[str] | None = None,
     python_version: str | None = None,
     skip_installed: bool = True,
@@ -1332,8 +1355,8 @@ def install(  # noqa: PLR0913
     packages_dir:
         The rez package store.  Packages are written to
         ``packages_dir/<family>/<version>/``.
-    extra_index_url:
-        Additional pip index URL (e.g. a PyTorch CUDA wheel mirror).
+    extra_flags:
+        More uv flags for the resolve and every download (e.g. a PyTorch wheel index).
     python_version:
         Python version string (``"3.12"``).  Defaults to the current interpreter.
     skip_installed:
@@ -1363,7 +1386,6 @@ def install(  # noqa: PLR0913
 
     resolved = resolve_full(
         packages,
-        extra_index_url=extra_index_url,
         extra_flags=extra_flags,
         python_version=python_version,
         uv_cmd=uv,
@@ -1397,7 +1419,6 @@ def install(  # noqa: PLR0913
             pkg,
             uv=uv,
             packages_dir=packages_dir,
-            extra_index_url=extra_index_url,
             extra_flags=extra_flags,
             python_version=python_version,
             resolved_versions=resolved_versions,
@@ -1414,16 +1435,23 @@ def install(  # noqa: PLR0913
             report.written.append(written[-1])
         else:
             report.rebuilt.append(label)
+            report.written.append(written[-1])
 
+    failed_note = ""
+    if failed:
+        failed_note = f", {len(failed)} failed"
     logger.info(
         "[Rez][uv] complete — %d new, %d gained this machine's variant, %d rebuilt, %d already installed%s",
         len(report.new),
         len(report.added_variant),
         len(report.rebuilt),
         len(report.already_installed),
-        f", {len(failed)} failed" if failed else "",
+        failed_note,
     )
     if failed:
         logger.warning("[Rez][uv] failed packages: %s", ", ".join(failed))
+        # The packages that did install stay, as does nothing that requires the failed ones; the
+        # variants they replaced are not coming back.
+        discard_retired(written)
         raise RezInstallError(failed)
     return report

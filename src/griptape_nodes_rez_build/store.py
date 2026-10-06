@@ -9,16 +9,14 @@ staging folder next to its destination (same filesystem), renamed into place, an
 from __future__ import annotations
 
 import ast
+import os
 import re
 import shutil
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 from packaging.version import InvalidVersion, Version
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 PACKAGE_FILE = "package.py"
 
@@ -30,15 +28,16 @@ class WrittenPackage:
     """Something one build wrote into a store: a whole package version, or one variant of it.
 
     ``variant`` is None when the build created the version (or replaced it with --rebuild); a
-    variant is recorded when the build added it to a version another build had created.
+    variant is recorded when the build added it to a version another build had created, or
+    replaced this machine's variant of it (--rebuild).
     """
 
     version_dir: Path
     variant: list[str] | None
     # The version's package.py before this build added the variant, restored on roll back.
     previous_package_file: str | None = None
-    # The version this build replaced (--rebuild), kept aside until the build's check passes:
-    # moved back on roll back, deleted by discard_retired.
+    # The version (or variant) this build replaced (--rebuild), kept aside until the build's check
+    # passes: moved back on roll back, deleted by discard_retired.
     retired: Path | None = None
 
     @property
@@ -55,7 +54,7 @@ def roll_back(written: list[WrittenPackage]) -> list[str]:
     Variants another build added, and versions another build created, are left alone: a variant
     this build added is removed and its version's ``package.py`` is put back as it was before the
     build (or, when that is not known, the variant is dropped from it; the version goes only when
-    no variant is left).
+    no variant is left). A version or variant this build replaced is moved back into place.
     """
     removed: list[str] = []
     for item in reversed(written):
@@ -63,6 +62,14 @@ def roll_back(written: list[WrittenPackage]) -> list[str]:
             shutil.rmtree(item.version_dir, ignore_errors=True)
             item.retired.rename(item.version_dir)
             removed.append(f"{item.label} (the version it replaced is back in place)")
+            continue
+        if item.variant is not None and item.retired is not None and item.retired.exists():
+            variant_dir = item.version_dir.joinpath(*item.variant)
+            if item.previous_package_file is not None:
+                write_text_atomic(item.version_dir / PACKAGE_FILE, item.previous_package_file)
+            shutil.rmtree(variant_dir, ignore_errors=True)
+            item.retired.rename(variant_dir)
+            removed.append(f"{item.label} (the variant it replaced is back in place)")
             continue
         if not item.version_dir.exists():
             continue
@@ -83,12 +90,11 @@ def roll_back(written: list[WrittenPackage]) -> list[str]:
     return removed
 
 
-# Source trees are copied into packages without these.
+# Source trees are copied into packages without these, at any depth.
 COPY_EXCLUDE_PATTERNS: tuple[str, ...] = (
     ".venv",
     ".venv-exec",
     ".git",
-    ".git*",
     "__pycache__",
     "*.pyc",
     "*.pyo",
@@ -97,6 +103,11 @@ COPY_EXCLUDE_PATTERNS: tuple[str, ...] = (
     ".mypy_cache",
     "node_modules",
     ".tox",
+)
+# Left out only at the top of the tree, where they are build output and repository files. Deeper
+# down a folder named build or dist can be part of the library (nodes/build/, data/dist/).
+COPY_EXCLUDE_TOP_LEVEL_PATTERNS: tuple[str, ...] = (
+    ".git*",
     "dist",
     "*.egg-info",
     "build",
@@ -148,8 +159,18 @@ def write_text_atomic(path: Path, text: str) -> None:
 
 
 def copy_tree(source: Path, destination: Path) -> None:
-    """Copy a source tree into a package payload, leaving out caches, VCS data, and virtualenvs."""
-    shutil.copytree(source, destination, ignore=shutil.ignore_patterns(*COPY_EXCLUDE_PATTERNS), dirs_exist_ok=True)
+    """Copy a source tree into a package payload, leaving out caches, VCS data, virtualenvs, and build output."""
+    everywhere = shutil.ignore_patterns(*COPY_EXCLUDE_PATTERNS)
+    top_level = shutil.ignore_patterns(*COPY_EXCLUDE_TOP_LEVEL_PATTERNS)
+    source_key = os.path.normcase(str(source.absolute()))
+
+    def ignore(directory: str, names: list[str]) -> set[str]:
+        ignored = set(everywhere(directory, names))
+        if os.path.normcase(str(Path(directory).absolute())) == source_key:
+            ignored |= set(top_level(directory, names))
+        return ignored
+
+    shutil.copytree(source, destination, ignore=ignore, dirs_exist_ok=True)
 
 
 def package_exists(store: Path, family: str, version: str) -> bool:
@@ -183,8 +204,14 @@ def version_sort_key(version: str) -> tuple[int, Version | tuple[int, ...]]:
     try:
         return (1, Version(version))
     except InvalidVersion:
-        numbers = tuple(int(part) if part.isdigit() else -1 for part in version.split("."))
-        return (0, numbers)
+        return (0, tuple(_numeric_part(part) for part in version.split(".")))
+
+
+def _numeric_part(part: str) -> int:
+    """A version part as a number for sorting; a part that is not a number sorts first."""
+    if part.isdigit():
+        return int(part)
+    return -1
 
 
 def _remove_variant(version_dir: Path, variant: list[str]) -> None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from griptape_nodes_rez_build.rez_uv import read_package_file
-from griptape_nodes_rez_build.store import WrittenPackage, discard_retired, move_into_place, roll_back
+from griptape_nodes_rez_build.store import WrittenPackage, copy_tree, discard_retired, move_into_place, roll_back
 
 OSX = ["platform-osx", "arch-arm64", "python-3.12"]
 WINDOWS = ["platform-windows", "arch-AMD64", "python-3.12"]
@@ -63,6 +63,28 @@ class TestRollBack:
         assert retired is not None
         assert not retired.exists()
 
+    def test_a_replaced_variant_is_put_back(self, tmp_path: Path) -> None:
+        version_dir = _package(tmp_path, [WINDOWS, OSX])
+        (version_dir / Path(*OSX) / "python" / "old.py").write_text("", encoding="utf-8")
+        before = (version_dir / "package.py").read_text(encoding="utf-8")
+        staged = tmp_path / "torch" / ".staging-new"
+        (staged / "python").mkdir(parents=True)
+        (staged / "python" / "new.py").write_text("", encoding="utf-8")
+        retired = move_into_place(staged, version_dir / Path(*OSX))
+        (version_dir / "package.py").write_text("name = 'torch'  # the failed rebuild\n", encoding="utf-8")
+
+        removed = roll_back(
+            [WrittenPackage(version_dir=version_dir, variant=OSX, previous_package_file=before, retired=retired)]
+        )
+
+        assert removed == [f"torch-2.7.0 variant {OSX} (the variant it replaced is back in place)"]
+        assert (version_dir / "package.py").read_text(encoding="utf-8") == before
+        assert (version_dir / Path(*OSX) / "python" / "old.py").is_file()
+        assert not (version_dir / Path(*OSX) / "python" / "new.py").exists()
+        assert (version_dir / Path(*WINDOWS) / "python").is_dir()
+        assert retired is not None
+        assert not retired.exists()
+
 
 class TestMoveIntoPlace:
     def test_a_new_version_replaces_nothing(self, tmp_path: Path) -> None:
@@ -85,3 +107,26 @@ class TestMoveIntoPlace:
         discard_retired([WrittenPackage(version_dir=version_dir, variant=None, retired=retired)])
         assert not retired.exists()
         assert version_dir.is_dir()
+
+
+class TestCopyTree:
+    def test_build_output_is_left_out_only_at_the_top(self, tmp_path: Path) -> None:
+        source = tmp_path / "library"
+        for relative in (
+            "build/lib/x.py",
+            "dist/library.whl",
+            "library.egg-info/PKG-INFO",
+            ".github/workflows/ci.yml",
+            "nodes/build/node.py",
+            "data/dist/model.json",
+            "nodes/__pycache__/node.cpython-312.pyc",
+            "nodes/.venv/bin/python",
+        ):
+            (source / relative).parent.mkdir(parents=True, exist_ok=True)
+            (source / relative).write_text("", encoding="utf-8")
+        destination = tmp_path / "payload"
+
+        copy_tree(source, destination)
+
+        copied = sorted(path.relative_to(destination).as_posix() for path in destination.rglob("*") if path.is_file())
+        assert copied == ["data/dist/model.json", "nodes/build/node.py"]

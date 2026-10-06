@@ -55,7 +55,9 @@ def main_options(
     ] = False,
 ) -> None:
     """Options for every command."""
-    level = logging.DEBUG if verbose else logging.INFO
+    level = logging.INFO
+    if verbose:
+        level = logging.DEBUG
     logging.basicConfig(level=level, format="%(message)s", handlers=[RichHandler(console=console, show_path=False)])
 
 

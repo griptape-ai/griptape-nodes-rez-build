@@ -122,6 +122,9 @@ def read_manifest(path: Path) -> LibraryManifest:
     dependencies = metadata.get("dependencies") or {}
     declarations = metadata.get("declarations") or []
     library_version = metadata.get("library_version")
+    declared_version = None
+    if library_version:
+        declared_version = str(library_version)
     return LibraryManifest(
         path=path,
         name=name,
@@ -136,7 +139,7 @@ def read_manifest(path: Path) -> LibraryManifest:
             and declaration.get("type") == "library_dependency"
             and declaration.get("url")
         ],
-        library_version=str(library_version) if library_version else None,
+        library_version=declared_version,
     )
 
 
@@ -181,8 +184,9 @@ def family_name(name: str) -> str:
 def library_version(manifest: LibraryManifest) -> str:
     """The version the library's packages get.
 
-    In order: ``pyproject.toml`` next to the manifest or up to four folders above it,
-    ``git describe --tags``, the manifest's ``library_version``, then ``1.0.0``.
+    In order: ``pyproject.toml`` in the manifest's folder or up to three folders above it (never
+    above the root of the git repository holding the manifest), ``git describe --tags``, the
+    manifest's ``library_version``, then ``1.0.0``.
     """
     version = _pyproject_version(manifest.path.parent)
     if version is None:
@@ -201,7 +205,12 @@ def library_version(manifest: LibraryManifest) -> str:
 
 
 def _pyproject_version(start: Path) -> str | None:
-    folder = start
+    # Inside a repository the search stops at its root, so a library without its own
+    # pyproject.toml never takes the version of an enclosing workspace (or of a temporary folder).
+    repository_root = git.repository_root(start)
+    if repository_root is not None:
+        repository_root = repository_root.resolve()
+    folder = start.resolve()
     for _ in range(_VERSION_SEARCH_DEPTH):
         pyproject = folder / "pyproject.toml"
         if pyproject.is_file():
@@ -213,7 +222,7 @@ def _pyproject_version(start: Path) -> str | None:
             version = data.get("project", {}).get("version") or data.get("tool", {}).get("poetry", {}).get("version")
             if version:
                 return str(version)
-        if folder.parent == folder:
+        if folder in (repository_root, folder.parent):
             break
         folder = folder.parent
     return None

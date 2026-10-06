@@ -11,3 +11,7 @@ class BuildError(Exception):
 
 class ResolveError(BuildError):
     """uv could not resolve the requested pip packages together."""
+
+
+class NoSolutionError(ResolveError):
+    """uv ran and found no set of versions that satisfies the requests (as opposed to failing to run or fetch)."""

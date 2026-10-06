@@ -17,6 +17,7 @@ from griptape_nodes_rez_build.launch import (
     LaunchOptions,
     LaunchPackage,
     PlatformSettings,
+    current_launch_platform,
     launch_package_content,
     library_request,
     next_launch_version,
@@ -199,6 +200,18 @@ class TestWriteLaunch:
         }
         fields.update(overrides)
         return LaunchOptions(**fields)  # type: ignore[arg-type]
+
+    def test_no_tools_for_this_platform_writes_nothing(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
+        # Unchecked here, it would become the newest launch package artists get.
+        _add_package(tmp_path, "griptape_nodes_engine", "0.103.0")
+        _add_package(tmp_path, "rez_test_edit", "0.1.0")
+        other = next(platform for platform in ("linux", "osx") if platform != current_launch_platform())
+
+        with pytest.raises(BuildError, match=r"no --tools for this machine's platform .* or pass --print"):
+            write_launch(self._options(tmp_path, fake_tools, tools=[f"{other}=/opt/rez/bin/rez"]))
+
+        assert not (tmp_path / "griptape_launch").exists()
+        assert fake_tools.env_calls == []
 
     def test_print_writes_nothing(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         _add_package(tmp_path, "griptape_nodes_engine", "0.103.0")
@@ -435,7 +448,8 @@ class TestValidateLaunch:
         ):
             validate_launch(fake_tools, package, store=tmp_path)
 
-    def test_platform_without_settings_is_not_checked(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
+    def test_platform_without_settings_fails_the_check(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
         settings = PlatformSettings(tools="/opt/rez/bin/rez", testing_store=None, config_file=None)
-        validate_launch(fake_tools, _package(per_platform={"nowhere": settings}), store=tmp_path)
+        with pytest.raises(BuildError, match="no --tools for this machine's platform"):
+            validate_launch(fake_tools, _package(per_platform={"nowhere": settings}), store=tmp_path)
         assert fake_tools.env_calls == []

@@ -50,6 +50,27 @@ RESOLVED = {
 }
 
 
+# An engine package an earlier build (on another platform) left in the store.
+KEPT_ENGINE = """\
+name = 'griptape_nodes_engine'
+
+version = '0.103.0'
+
+requires = [
+    'griptape_nodes-0.98.0',
+    'griptape_nodes_editor_dist-0.125.0',
+    'httpx-0.28+<1',
+]
+"""
+
+
+def _kept_engine(tmp_path: Path, content: str = KEPT_ENGINE) -> Path:
+    package_file = tmp_path / "store" / "griptape_nodes_engine" / "0.103.0" / "package.py"
+    package_file.parent.mkdir(parents=True)
+    package_file.write_text(content, encoding="utf-8")
+    return package_file
+
+
 def _engine_repo(tmp_path: Path, pyproject: str = PYPROJECT) -> Path:
     repo = tmp_path / "engine"
     (repo / "src" / "griptape_nodes").mkdir(parents=True)
@@ -347,16 +368,44 @@ class TestBuildEngine:
         install.assert_not_called()
 
     def test_existing_engine_is_kept_and_still_checked(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
-        package_file = tmp_path / "store" / "griptape_nodes_engine" / "0.103.0" / "package.py"
-        package_file.parent.mkdir(parents=True)
-        package_file.write_text("# from another platform's build\n", encoding="utf-8")
+        package_file = _kept_engine(tmp_path)
         with (
-            patch.object(engine, "install_packages", return_value=self._report()),
+            patch.object(engine, "install_packages", return_value=self._report()) as install,
             patch.object(engine, "validate_engine") as validate,
         ):
-            build_engine(self._options(tmp_path, fake_tools))
-        assert package_file.read_text(encoding="utf-8") == "# from another platform's build\n"
+            build_engine(self._options(tmp_path, fake_tools, app_version=None))
+        assert package_file.read_text(encoding="utf-8") == KEPT_ENGINE
         validate.assert_called_once()
+        # This machine installs the app and editor the kept package pins, not the newest ones.
+        requests = install.call_args.args[1]
+        assert "griptape-nodes[editor]==0.98.0" in requests
+        assert "griptape-nodes-editor-dist==0.125.0" in requests
+
+    def test_kept_engine_refuses_another_app_version(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
+        _kept_engine(tmp_path)
+        with (
+            patch.object(engine, "install_packages") as install,
+            pytest.raises(BuildError, match=r"pinned to gtn app 0\.98\.0. Pass --app-version 0\.98\.0, or --rebuild"),
+        ):
+            build_engine(self._options(tmp_path, fake_tools, app_version="0.99.0"))
+        install.assert_not_called()
+
+    def test_kept_engine_refuses_a_different_editor_choice(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
+        _kept_engine(tmp_path)
+        with pytest.raises(BuildError, match="includes it"):
+            build_engine(self._options(tmp_path, fake_tools, app_version=None, editor=False))
+
+    def test_kept_engine_without_an_app_pin_asks_for_rebuild(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
+        _kept_engine(tmp_path, "# not written by this tool\n")
+        with pytest.raises(BuildError, match="does not name the gtn app version"):
+            build_engine(self._options(tmp_path, fake_tools))
+
+    def test_kept_pins_are_read_from_platform_requires(self, tmp_path: Path) -> None:
+        package_file = _kept_engine(
+            tmp_path,
+            "platform_requires = {\n    '*': ['griptape_nodes-0.98.0'],\n    'linux-x86_64': ['griptape_nodes-0.98.0'],\n}\n",
+        )
+        assert engine.read_kept_pins(package_file) == engine.KeptPins(app="0.98.0", editor=None)
 
     def test_failed_check_fails_the_build(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
         fake_tools.env_results = [failed("conflict")]
@@ -407,13 +456,11 @@ class TestBuildEngine:
         assert [p.name for p in package_file.parent.parent.iterdir()] == ["0.103.0"]
 
     def test_failed_check_on_kept_packages_says_to_rebuild(self, tmp_path: Path, fake_tools: FakeRezTools) -> None:
-        package_file = tmp_path / "store" / "griptape_nodes_engine" / "0.103.0" / "package.py"
-        package_file.parent.mkdir(parents=True)
-        package_file.write_text("# another build's\n", encoding="utf-8")
+        package_file = _kept_engine(tmp_path)
         fake_tools.env_results = [failed("conflict")]
         with (
             patch.object(engine, "install_packages", return_value=self._report()),
             pytest.raises(BuildError, match="Pass --rebuild"),
         ):
-            build_engine(self._options(tmp_path, fake_tools))
+            build_engine(self._options(tmp_path, fake_tools, app_version=None))
         assert package_file.is_file()

@@ -176,15 +176,7 @@ def write_launch(options: LaunchOptions) -> None:
     notices = console
     if options.print_only:
         notices = Console(stderr=True)
-    if not options.libraries:
-        notices.print(
-            "[yellow]No --library given: the launch package provides the engine only, and no libraries will load.[/yellow]"
-        )
-    if testing_stores and not config_files:
-        notices.print(
-            "[yellow]--testing-store is recorded in the package only. Give a rezconfig that adds the store with "
-            "--config-file so workers find it.[/yellow]"
-        )
+    _print_notices(options, has_testing_stores=bool(testing_stores), has_config_files=bool(config_files), out=notices)
     stores = [options.store, *_search_paths(options.rez_tools)]
 
     package = LaunchPackage(
@@ -217,6 +209,7 @@ def write_launch(options: LaunchOptions) -> None:
     if options.rez_tools is None:
         msg = f"Attempted to check {LAUNCH_FAMILY}-{package.version}. Failed because rez's tools were not found."
         raise BuildError(msg)
+    _check_platform_is_set_up(package)
     version_dir = options.store / LAUNCH_FAMILY / package.version
     staged = staging_dir(options.store / LAUNCH_FAMILY, package.version)
     try:
@@ -239,6 +232,38 @@ def write_launch(options: LaunchOptions) -> None:
         msg = f"{exc}\n{LAUNCH_FAMILY}-{package.version} {outcome} {options.store}."
         raise BuildError(msg) from exc
     discard_retired(written)
+
+
+def _print_notices(options: LaunchOptions, *, has_testing_stores: bool, has_config_files: bool, out: Console) -> None:
+    """Warn about launch packages that will work, but probably not as the administrator expects."""
+    if not options.libraries:
+        out.print(
+            "[yellow]No --library given: the launch package provides the engine only, and no libraries will load.[/yellow]"
+        )
+    if has_testing_stores and not has_config_files:
+        out.print(
+            "[yellow]--testing-store is recorded in the package only. Give a rezconfig that adds the store with "
+            "--config-file so workers find it.[/yellow]"
+        )
+
+
+def _check_platform_is_set_up(package: LaunchPackage) -> None:
+    """Stop unless the package has --tools for this machine, where it is checked after writing."""
+    this_platform = current_launch_platform()
+    if this_platform in package.per_platform:
+        return
+    msg = (
+        f"Attempted to write {LAUNCH_FAMILY}-{package.version}. Failed because it has no --tools for this "
+        f"machine's platform ({this_platform}), so it cannot be checked here, and an unchecked launch package "
+        f"would become the one artists get. Add --tools {this_platform}=PATH, run write-launch on a "
+        f"{this_platform} machine, or pass --print to write the package yourself."
+    )
+    raise BuildError(msg)
+
+
+def current_launch_platform() -> str:
+    """This machine's platform as rez names it (``windows``, ``osx``, ``linux``): a --tools key."""
+    return _PLATFORM_KEYS.get(sys.platform, "linux")
 
 
 def launch_package_content(package: LaunchPackage) -> str:
@@ -335,12 +360,13 @@ def validate_launch(tools: RezTools, package: LaunchPackage, *, store: Path) -> 
     path real workers take, so anything the launch package does to rez's own settings (such as
     ``REZ_CONFIG_FILE``) is part of the check.
     """
-    this_platform = _PLATFORM_KEYS.get(sys.platform, "linux")
+    this_platform = current_launch_platform()
     if this_platform not in package.per_platform:
-        console.print(
-            f"  [yellow]Not checked on this machine: the package has no --tools for {this_platform}.[/yellow]"
+        msg = (
+            f"Attempted to check {LAUNCH_FAMILY}-{package.version}. Failed because it has no --tools for this "
+            f"machine's platform ({this_platform})."
         )
-        return
+        raise BuildError(msg)
     paths = tools.paths_with(store)
     request = f"{LAUNCH_FAMILY}=={package.version}"
     console.print(f"[bold]Checking[/bold] rez env {request} ...")

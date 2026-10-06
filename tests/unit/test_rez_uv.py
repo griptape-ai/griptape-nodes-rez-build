@@ -18,21 +18,22 @@ from griptape_nodes_rez_build.rez_uv import (
     STATE_ADD_VARIANT,
     STATE_INSTALLED,
     STATE_NEW,
+    AnnotationGraph,
     InstallReport,
     ParsedRequirement,
     ResolvedEntry,
     ResolvedPackage,
     RezInstallError,
+    RezPlatform,
     WheelInfo,
+    WheelTag,
     _copy_payload,
     _detect_wheel_tag,
     _install_one,
     _merge_variant,
     _other_platforms,
     _parse_annotation_graph,
-    _parse_entry_points,
     _pinned_request,
-    _read_existing_variants,
     _variant_subpath,
     _variant_usable_here,
     _write_package_py,
@@ -43,7 +44,6 @@ from griptape_nodes_rez_build.rez_uv import (
     flags_for_torch_backend,
     install,
     install_state,
-    is_installed,
     marker_applies,
     merge_platform_requires,
     parse_requirement,
@@ -57,12 +57,13 @@ from griptape_nodes_rez_build.rez_uv import (
     torch_backend_request,
     wheel_requires,
 )
+from griptape_nodes_rez_build.store import roll_back
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-LINUX = ("linux", "x86_64")
-OSX = ("osx", "arm64")
+LINUX = RezPlatform(platform="linux", arch="x86_64")
+OSX = RezPlatform(platform="osx", arch="arm64")
 
 COMPILE_OUTPUT = """\
 certifi==2024.2.2
@@ -266,7 +267,7 @@ class TestParseAnnotationGraph:
         assert requirers_of["a"] == {"b"}
 
     def test_empty_output(self) -> None:
-        assert _parse_annotation_graph("") == ([], {})
+        assert _parse_annotation_graph("") == AnnotationGraph(pkg_list=[], requirers_of={})
 
 
 class TestResolveFull:
@@ -275,8 +276,7 @@ class TestResolveFull:
         with patch.object(rez_uv.subprocess, "run", side_effect=fake) as run:
             resolved = resolve_full(
                 ["requests", "torchvision"],
-                extra_index_url="https://example.com/simple",
-                extra_flags=["--torch-backend=auto"],
+                extra_flags=["--extra-index-url", "https://example.com/simple", "--torch-backend=auto"],
                 python_version="3.12",
                 uv_cmd="uv-bin",
             )
@@ -319,32 +319,21 @@ class TestResolveFull:
 # ---------------------------------------------------------------------------
 
 
-class TestParseEntryPoints:
-    def test_reads_only_console_scripts(self) -> None:
-        text = (
-            "[gui_scripts]\ngui = pkg:gui\n\n[console_scripts]\ncli = pkg:main\ntool=pkg.tool:run\n\n[other]\nx = y\n"
-        )
-        assert _parse_entry_points(text) == ["cli", "tool"]
-
-    def test_no_console_scripts(self) -> None:
-        assert _parse_entry_points("[other]\nx = y\n") == []
-
-
 class TestDetectWheelTag:
     def test_pure_python(self, tmp_path: Path) -> None:
         (tmp_path / "WHEEL").write_text("Wheel-Version: 1.0\nTag: py3-none-any\n", encoding="utf-8")
-        assert _detect_wheel_tag(tmp_path) == (True, "any")
+        assert _detect_wheel_tag(tmp_path) == WheelTag(is_pure_python=True, platform_tag="any")
 
     def test_platform_wheel(self, tmp_path: Path) -> None:
         (tmp_path / "WHEEL").write_text("Tag: cp312-cp312-macosx_11_0_arm64\n", encoding="utf-8")
-        assert _detect_wheel_tag(tmp_path) == (False, "macosx_11_0_arm64")
+        assert _detect_wheel_tag(tmp_path) == WheelTag(is_pure_python=False, platform_tag="macosx_11_0_arm64")
 
     def test_missing_wheel_file(self, tmp_path: Path) -> None:
-        assert _detect_wheel_tag(tmp_path) == (True, "any")
+        assert _detect_wheel_tag(tmp_path) == WheelTag(is_pure_python=True, platform_tag="any")
 
     def test_malformed_tag_defaults_to_pure(self, tmp_path: Path) -> None:
         (tmp_path / "WHEEL").write_text("Wheel-Version: 1.0\nTag: py3-none\n", encoding="utf-8")
-        assert _detect_wheel_tag(tmp_path) == (True, "any")
+        assert _detect_wheel_tag(tmp_path) == WheelTag(is_pure_python=True, platform_tag="any")
 
 
 class TestReadWheelInfo:
@@ -712,18 +701,18 @@ class TestVariants:
         ]
         assert _variant_subpath(variant) == Path(*variant)
 
-    def test_read_existing_variants_missing_file(self, tmp_path: Path) -> None:
-        assert _read_existing_variants(tmp_path / "package.py") == []
+    def test_read_package_file_variants_missing_file(self, tmp_path: Path) -> None:
+        assert read_package_file(tmp_path / "package.py").variants == []
 
-    def test_read_existing_variants(self, tmp_path: Path) -> None:
+    def test_read_package_file_variants(self, tmp_path: Path) -> None:
         pkg_file = tmp_path / "package.py"
         pkg_file.write_text("name = 'x'\nvariants = [['python-3.12'], ['python-3.13']]\n", encoding="utf-8")
-        assert _read_existing_variants(pkg_file) == [["python-3.12"], ["python-3.13"]]
+        assert read_package_file(pkg_file).variants == [["python-3.12"], ["python-3.13"]]
 
-    def test_read_existing_variants_unparsable(self, tmp_path: Path, mock_logger: MagicMock) -> None:
+    def test_read_package_file_variants_unparsable(self, tmp_path: Path, mock_logger: MagicMock) -> None:
         pkg_file = tmp_path / "package.py"
         pkg_file.write_text("variants = [[\n", encoding="utf-8")
-        assert _read_existing_variants(pkg_file) == []
+        assert read_package_file(pkg_file).variants == []
         mock_logger.debug.assert_called()
 
     def test_read_package_with_late_requires_is_not_executed(self, tmp_path: Path) -> None:
@@ -843,7 +832,7 @@ class TestWritePackagePy:
         with patch.object(rez_uv, "_current_rez_platform", return_value=OSX):
             _write_package_py(tmp_path, "demo_pkg", info, [], variant=["platform-osx", "arch-arm64", "python-3.12"])
 
-        assert _read_existing_variants(tmp_path / "package.py") == [
+        assert read_package_file(tmp_path / "package.py").variants == [
             ["platform-linux", "arch-x86_64", "python-3.12"],
             ["platform-osx", "arch-arm64", "python-3.12"],
         ]
@@ -870,12 +859,10 @@ def _existing_package(
 class TestInstallState:
     def test_new(self, tmp_path: Path) -> None:
         assert install_state("ruamel.yaml", "0.18.6", tmp_path) == STATE_NEW
-        assert is_installed("ruamel.yaml", "0.18.6", tmp_path) is False
 
     def test_pure_package_serves_every_platform(self, tmp_path: Path, linux_platform: None) -> None:  # noqa: ARG002
         _existing_package(tmp_path, "ruamel_yaml", "0.18.6", [["python-3.12"]])
         assert install_state("ruamel.yaml", "0.18.6", tmp_path, python_version="3.12") == STATE_INSTALLED
-        assert is_installed("ruamel.yaml", "0.18.6", tmp_path, python_version="3.12") is True
 
     def test_other_platforms_variant_needs_this_one_added(self, tmp_path: Path, linux_platform: None) -> None:  # noqa: ARG002
         _existing_package(tmp_path, "torch", "2.7.0", [["platform-osx", "arch-arm64", "python-3.12"]])
@@ -1042,8 +1029,7 @@ class TestInstallOne:
                 ResolvedPackage(pip_name="torch", version="2.7.0", local_version="cu128"),
                 uv="uv",
                 packages_dir=tmp_path,
-                extra_index_url="https://download.pytorch.org/whl/cu128",
-                extra_flags=["--torch-backend=auto"],
+                extra_flags=["--extra-index-url", "https://download.pytorch.org/whl/cu128", "--torch-backend=auto"],
                 python_version="3.12",
                 resolved_versions={"nvidia-cudnn-cu12": "9.5.1.17"},
             )
@@ -1077,7 +1063,6 @@ class TestInstallOne:
                 ResolvedPackage(pip_name="click", version="8.1.0"),
                 uv="uv",
                 packages_dir=tmp_path,
-                extra_index_url=None,
                 extra_flags=None,
                 python_version="3.12",
             )
@@ -1106,7 +1091,6 @@ class TestInstallOne:
                 ResolvedPackage(pip_name="click", version="8.1.0"),
                 uv="uv",
                 packages_dir=tmp_path,
-                extra_index_url=None,
                 extra_flags=None,
                 python_version="3.12",
             )
@@ -1128,7 +1112,6 @@ class TestInstallOne:
                 ResolvedPackage(pip_name="thing", version="1.0"),
                 uv="uv",
                 packages_dir=tmp_path,
-                extra_index_url=None,
                 extra_flags=None,
                 python_version="3.12",
             )
@@ -1143,7 +1126,6 @@ class TestInstallOne:
                 ResolvedPackage(pip_name="ghost", version="1.0"),
                 uv="uv",
                 packages_dir=tmp_path,
-                extra_index_url=None,
                 extra_flags=None,
                 python_version="3.12",
             )
@@ -1161,7 +1143,6 @@ class TestInstallOne:
                 ResolvedPackage(pip_name="ghost", version="1.0"),
                 uv="uv",
                 packages_dir=tmp_path,
-                extra_index_url=None,
                 extra_flags=None,
                 python_version="3.12",
             )
@@ -1175,7 +1156,6 @@ class TestInstallOne:
                 ResolvedPackage(pip_name="empty", version="1.0"),
                 uv="uv",
                 packages_dir=tmp_path,
-                extra_index_url=None,
                 extra_flags=None,
                 python_version="3.12",
             )
@@ -1200,7 +1180,6 @@ class TestInstallOne:
                 ResolvedPackage(pip_name="six", version="1.16.0"),
                 uv="uv",
                 packages_dir=tmp_path,
-                extra_index_url=None,
                 extra_flags=None,
                 python_version="3.12",
             )
@@ -1312,6 +1291,28 @@ class TestInstall:
         assert report.new == []
 
     @pytest.mark.usefixtures("mock_logger")
+    def test_a_rebuilt_variant_is_rolled_back_to_the_old_one(self, tmp_path: Path, linux_platform: None) -> None:  # noqa: ARG002
+        preinstalled = _existing_package(tmp_path, "six", "1.16.0", [["python-3.12"]])
+        before = (preinstalled / "package.py").read_text(encoding="utf-8")
+        old_file = preinstalled / "python-3.12" / "old_marker.txt"
+        old_file.write_text("", encoding="utf-8")
+        fake = FakeUv({"six": {}}, compile_output="six==1.16.0\n")
+
+        with patch.object(rez_uv.subprocess, "run", side_effect=fake):
+            report = install(["six"], packages_dir=tmp_path, skip_installed=False, python_version="3.12", uv_cmd="uv")
+
+        # Listed with the old variant it set aside, so a failed check can put that back.
+        assert [item.label for item in report.written] == ["six-1.16.0 variant ['python-3.12']"]
+        assert report.written[0].retired is not None
+        assert not old_file.exists()
+
+        roll_back(report.written)
+
+        assert old_file.is_file()
+        assert (preinstalled / "package.py").read_text(encoding="utf-8") == before
+        assert not any(path.name.startswith(".retired-") for path in preinstalled.rglob("*"))
+
+    @pytest.mark.usefixtures("mock_logger")
     def test_second_platform_adds_its_variant_to_a_shared_store(self, tmp_path: Path) -> None:
         compile_output = "torch==2.7.0\nsix==1.16.0\n"
         wheels = {"torch": {"tag": "cp312-cp312-macosx_11_0_arm64"}, "six": {}}
@@ -1322,7 +1323,7 @@ class TestInstall:
         ):
             first = install(["torch"], packages_dir=tmp_path, python_version="3.12", uv_cmd="uv")
 
-        windows = ("windows", "AMD64")
+        windows = RezPlatform(platform="windows", arch="AMD64")
         wheels["torch"] = {"tag": "cp312-cp312-win_amd64"}
         compile_output = "torch==2.7.0+cu128\nsix==1.16.0\n"
         fake = FakeUv(wheels, compile_output=compile_output)

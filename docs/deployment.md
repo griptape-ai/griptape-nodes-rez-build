@@ -139,8 +139,10 @@ come from matching releases: a worker from one release may not register with an 
 another.
 
 An existing engine package of the same version is kept, and the build only adds what this machine
-needs (its variants of compiled dependencies). `--rebuild` replaces the engine package and
-reinstalls this machine's variants of every dependency.
+needs (its variants of compiled dependencies). It installs the app and editor versions the kept
+package is pinned to, not the newest ones; `--app-version` or `--no-editor` choices that differ from
+the kept package stop the build. `--rebuild` replaces the engine package and reinstalls this
+machine's variants of every dependency, and puts the previous ones back if its check fails.
 
 The check: `rez env griptape_nodes_engine==<version>` resolves from the store, and the engine, the
 app, the editor, and `gtn` all come from it.
@@ -168,7 +170,9 @@ display name. See [Libraries](libraries.md) for what each package contains, how 
 chosen, and how library dependencies work.
 
 - Libraries the manifest declares as dependencies are cloned and built first when the store has no
-  `_edit` package for them. `--rebuild` rebuilds them (and their dependencies) as well.
+  `_edit` package for them that resolves on this machine. One another platform built is built again
+  here, which keeps its packages and adds this machine's variants of its pip dependencies.
+  `--rebuild` rebuilds them (and their dependencies) as well.
 - Existing packages of the same version are kept unless you pass `--rebuild`.
 - The check: both packages resolve from the store, and `GTN_LIBRARY_PATHS` and
   `GTN_LIBRARY_WORKER_REQUESTS` hold this library's manifest and worker request.
@@ -227,9 +231,11 @@ sets.
   `--config-file`. The tool warns when a testing store is given without one.
 - `--version` defaults to one patch above the newest launch package in the store. An existing
   version is replaced only with `--rebuild`. `--print` shows the package without writing it.
-- The check (on a platform the package is set up for): `rez env griptape_launch==<version>` resolves,
-  the engine and app come from the stores, the settings are set, and each library's worker request
-  resolves the way the worker prefix will run it.
+- The check: `rez env griptape_launch==<version>` resolves, the engine and app come from the
+  stores, the settings are set, and each library's worker request resolves the way the worker
+  prefix will run it. The package must have `--tools` for the platform you run `write-launch` on,
+  so it can be checked there; otherwise nothing is written. Use `--print` to write a package for
+  other platforms only.
 
 The shell that runs `rez env griptape_launch` must already see the store the launch package is in:
 the package cannot add the store it is found in.

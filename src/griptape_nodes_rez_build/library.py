@@ -39,8 +39,9 @@ from griptape_nodes_rez_build.common import (
     rolled_back,
 )
 from griptape_nodes_rez_build.console import console
-from griptape_nodes_rez_build.errors import BuildError, ResolveError
+from griptape_nodes_rez_build.errors import BuildError, NoSolutionError
 from griptape_nodes_rez_build.manifest import (
+    EDIT_SUFFIX,
     LibraryFamily,
     LibraryManifest,
     family_from_url,
@@ -123,7 +124,10 @@ class BuiltLibrary:
 
 def build_library_from_git(url: str, ref: str | None, options: LibraryBuildOptions) -> BuiltLibrary:
     """Clone *url* (at *ref*) into a temporary folder and build it."""
-    console.print(f"  Cloning [cyan]{url}[/cyan]" + (f" at [cyan]{ref}[/cyan]" if ref else ""))
+    message = f"  Cloning [cyan]{url}[/cyan]"
+    if ref:
+        message += f" at [cyan]{ref}[/cyan]"
+    console.print(message)
     with tempfile.TemporaryDirectory(prefix="griptape_rez_library_") as temporary:
         clone_dir = Path(temporary) / "repo"
         git.clone(url, clone_dir, ref)
@@ -182,7 +186,7 @@ def build_library_from_dir(library_dir: Path, options: LibraryBuildOptions) -> B
             options.tools, paths, manifest, family, version=version, torch_backends=installed.torch_backends
         )
     except BuildError as exc:
-        raise rolled_back(exc, written) from exc
+        raise rolled_back(exc, written, rebuild=options.rebuild) from exc
     discard_retired(written)
     return BuiltLibrary(family=family, version=version, torch_backends=installed.torch_backends)
 
@@ -212,7 +216,10 @@ def plan_torch_passes(manifest_flags: list[str], torch_backends: list[str] | Non
 
     if torch_backends:
         skip_unavailable = ALL_TORCH_BACKENDS in torch_backends
-        backends = list(TORCH_BACKENDS) if skip_unavailable else list(dict.fromkeys(torch_backends))
+        if skip_unavailable:
+            backends = list(TORCH_BACKENDS)
+        else:
+            backends = list(dict.fromkeys(torch_backends))
         unknown = [backend for backend in backends if backend not in TORCH_BACKENDS]
         if unknown:
             msg = (
@@ -237,15 +244,20 @@ def plan_torch_passes(manifest_flags: list[str], torch_backends: list[str] | Non
 
 
 def build_library_dependencies(manifest: LibraryManifest, options: LibraryBuildOptions) -> list[str]:
-    """Build the libraries *manifest* declares, when the store lacks them or with --rebuild, and return their requires.
+    """Build the libraries *manifest* declares, unless they already resolve here, and return their requires.
 
     A required dependency becomes ``<family>_edit``; an optional one the weak ``~<family>_edit``,
     which constrains it only when something else brings it in.
+
+    A dependency already in the store is kept only when it resolves on this machine. Another
+    platform's build leaves its version in the store without this platform's variants of its pip
+    packages; building it again keeps its packages and adds those variants.
     """
     requires: list[str] = []
+    paths = options.tools.paths_with(options.store)
     for dependency in manifest.library_dependencies:
         family = family_from_url(dependency.url)
-        edit_family = f"{family}_edit"
+        edit_family = f"{family}{EDIT_SUFFIX}"
         if dependency.required:
             requires.append(edit_family)
         else:
@@ -255,10 +267,17 @@ def build_library_dependencies(manifest: LibraryManifest, options: LibraryBuildO
             continue
         existing = newest_version([options.store], edit_family)
         if existing is not None and not options.rebuild:
+            resolved = options.tools.resolves([f"{edit_family}=={existing}", f"python-{python_version()}"], paths=paths)
+            if resolved.succeeded:
+                console.print(
+                    f"  Library dependency {edit_family}-{existing} is already in the store and resolves here "
+                    "(--rebuild rebuilds it)."
+                )
+                continue
             console.print(
-                f"  Library dependency {edit_family}-{existing} is already in the store (--rebuild rebuilds it)."
+                f"  Library dependency {edit_family}-{existing} is in the store but does not resolve on this machine; "
+                "building it to add this machine's packages."
             )
-            continue
         console.print(f"[bold]Building library dependency[/bold] {dependency.url} ...")
         dependency_options = replace(options, interactive=False)
         try:
@@ -355,39 +374,23 @@ def validate_library(  # noqa: PLR0913
     version: str,
     torch_backends: list[str],
 ) -> None:
-    """Resolve both packages from the store and check what they publish to the engine."""
+    """Resolve both packages from the store, once per torch build, and check what they publish to the engine."""
     expected_request = f"{manifest.name}={family.family}=={version}"
-    backend_requests = [torch_backend_request(torch_backends[0])] if torch_backends else []
-    for request in (f"{family.edit_family}=={version}", f"{family.family}=={version}"):
-        console.print(f"[bold]Checking[/bold] rez env {request} ...")
-        result = tools.run_python(
-            [request, f"python-{python_version()}", *backend_requests], _VALIDATE_SCRIPT, paths=paths
-        )
-        if not result.succeeded:
-            msg = f"Attempted to resolve {request}. Failed because rez reported:\n{result.failure_summary()}"
-            raise BuildError(msg)
-        try:
-            published = json.loads(result.stdout.strip().splitlines()[-1])
-        except (json.JSONDecodeError, IndexError) as exc:
-            msg = f"Attempted to check {request}. Failed because its python printed: {result.stdout!r}"
-            raise BuildError(msg) from exc
-
-        manifests = [Path(entry) for entry in published["GTN_LIBRARY_PATHS"].split(os.pathsep) if entry]
-        own = [path for path in manifests if path.name == manifest.path.name and family.edit_family in path.parts]
-        if not own or not own[0].is_file():
-            msg = (
-                f"Attempted to check that {request} publishes its manifest in GTN_LIBRARY_PATHS. Failed because "
-                f"GTN_LIBRARY_PATHS is {published['GTN_LIBRARY_PATHS']!r}."
+    # Each torch build is its own variant, so each one is resolved: one that does not resolve fails the build.
+    backend_requests: list[list[str]] = [[torch_backend_request(backend)] for backend in torch_backends]
+    if not backend_requests:
+        backend_requests = [[]]
+    for package_request in (f"{family.edit_family}=={version}", f"{family.family}=={version}"):
+        for backend_request in backend_requests:
+            _check_published(
+                tools,
+                paths,
+                manifest,
+                family,
+                request=" ".join([package_request, *backend_request]),
+                rez_request=[package_request, f"python-{python_version()}", *backend_request],
+                expected_request=expected_request,
             )
-            raise BuildError(msg)
-        requests = published["GTN_LIBRARY_WORKER_REQUESTS"].split(os.pathsep)
-        if expected_request not in requests:
-            msg = (
-                f"Attempted to check that {request} publishes '{expected_request}' in GTN_LIBRARY_WORKER_REQUESTS. "
-                f"Failed because it is {published['GTN_LIBRARY_WORKER_REQUESTS']!r}."
-            )
-            raise BuildError(msg)
-        console.print(f"  [green]rez env {request}: resolves; manifest {own[0]}[/green]")
 
     console.print(
         Panel(
@@ -398,6 +401,46 @@ def validate_library(  # noqa: PLR0913
             expand=False,
         )
     )
+
+
+def _check_published(  # noqa: PLR0913
+    tools: RezTools,
+    paths: list[Path],
+    manifest: LibraryManifest,
+    family: LibraryFamily,
+    *,
+    request: str,
+    rez_request: list[str],
+    expected_request: str,
+) -> None:
+    """Resolve *rez_request* and check it publishes the library's manifest and worker request."""
+    console.print(f"[bold]Checking[/bold] rez env {request} ...")
+    result = tools.run_python(rez_request, _VALIDATE_SCRIPT, paths=paths)
+    if not result.succeeded:
+        msg = f"Attempted to resolve {request}. Failed because rez reported:\n{result.failure_summary()}"
+        raise BuildError(msg)
+    try:
+        published = json.loads(result.stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError) as exc:
+        msg = f"Attempted to check {request}. Failed because its python printed: {result.stdout!r}"
+        raise BuildError(msg) from exc
+
+    manifests = [Path(entry) for entry in published["GTN_LIBRARY_PATHS"].split(os.pathsep) if entry]
+    own = [path for path in manifests if path.name == manifest.path.name and family.edit_family in path.parts]
+    if not own or not own[0].is_file():
+        msg = (
+            f"Attempted to check that {request} publishes its manifest in GTN_LIBRARY_PATHS. Failed because "
+            f"GTN_LIBRARY_PATHS is {published['GTN_LIBRARY_PATHS']!r}."
+        )
+        raise BuildError(msg)
+    requests = published["GTN_LIBRARY_WORKER_REQUESTS"].split(os.pathsep)
+    if expected_request not in requests:
+        msg = (
+            f"Attempted to check that {request} publishes '{expected_request}' in GTN_LIBRARY_WORKER_REQUESTS. "
+            f"Failed because it is {published['GTN_LIBRARY_WORKER_REQUESTS']!r}."
+        )
+        raise BuildError(msg)
+    console.print(f"  [green]rez env {request}: resolves; manifest {own[0]}[/green]")
 
 
 def _install_dependencies(
@@ -417,10 +460,12 @@ def _install_dependencies(
             pass_report = install_packages(
                 label, specs, store=options.store, skip_installed=not options.rebuild, extra_flags=torch_pass.flags
             )
-        except ResolveError:
+        except NoSolutionError as exc:
+            # Only "no solution" means the build lacks what the library pins; network, index, or auth
+            # failures stop the build, so a store missing a build never looks finished.
             if not plan.skip_unavailable:
                 raise
-            console.print(f"  Torch build {torch_pass.backend} skipped: it does not publish what the library pins.")
+            console.print(f"  [yellow]Torch build {torch_pass.backend} skipped:[/yellow] {exc}")
             continue
         report.merge(pass_report)
 
@@ -474,7 +519,9 @@ def _asks_for_auto_torch_backend(flags: list[str]) -> bool:
         if name != "--torch-backend":
             continue
         if not separator:
-            value = flags[index + 1] if index + 1 < len(flags) else ""
+            value = ""
+            if index + 1 < len(flags):
+                value = flags[index + 1]
         if value.strip() == "auto":
             return True
     return False

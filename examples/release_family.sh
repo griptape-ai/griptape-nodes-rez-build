@@ -10,11 +10,15 @@ set -euo pipefail
 FAMILY="$1"; LOCAL="$2"; RELEASE="$3"; PRODUCTION_PATHS="$4"; DRY_RUN="${5:-}"
 EXTRA_REQUESTS="${EXTRA_REQUESTS:-}"
 mkdir -p "$RELEASE"
+# Resolves are written to a context file and read with rez-context, so no Python code goes
+# through rez-env's command line (rez-env on Windows strips the double quotes inline code needs).
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
 
 # 1. Resolve the family the way artists will, but with the local store first.
 # shellcheck disable=SC2086  # EXTRA_REQUESTS is a space-separated list of requests
-RESOLVE=$(rez-env "$FAMILY" $EXTRA_REQUESTS --paths "$LOCAL:$PRODUCTION_PATHS" -- \
-  python -c "import os; print(os.environ['REZ_USED_RESOLVE'])")
+rez-env "$FAMILY" $EXTRA_REQUESTS --paths "$LOCAL:$PRODUCTION_PATHS" --output "$WORK/local.rxt"
+RESOLVE=$(rez-context --print-resolve "$WORK/local.rxt")
 
 # 2. Copy each resolved package that came from the local store and is not yet released.
 for spec in $RESOLVE; do
@@ -27,5 +31,6 @@ done
 # 3. Validate: the family must resolve without the local store.
 if [ -z "$DRY_RUN" ]; then
   # shellcheck disable=SC2086
-  rez-env "$FAMILY" $EXTRA_REQUESTS --paths "$PRODUCTION_PATHS" -- python -c "print('resolves without the local store')"
+  rez-env "$FAMILY" $EXTRA_REQUESTS --paths "$PRODUCTION_PATHS" --output "$WORK/production.rxt"
+  echo "$FAMILY resolves without the local store"
 fi

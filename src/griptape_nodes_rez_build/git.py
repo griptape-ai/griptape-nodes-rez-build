@@ -12,10 +12,17 @@ _DESCRIBE_PARTS = 3
 
 
 def clone(url: str, destination: Path, ref: str | None) -> None:
-    """Clone *url* into *destination* and check out *ref* (a branch, tag, or commit) when given."""
-    _run_or_fail(["git", "clone", "--quiet", url, str(destination)], f"clone {url}")
+    """Clone *url* into *destination* and check out *ref* (a branch, tag, or commit) when given.
+
+    *url* can come from a cloned manifest and *ref* from the command line, so both are passed
+    after an end-of-options marker: a value starting with ``-`` is never read as a git option.
+    """
+    _run_or_fail(["git", "clone", "--quiet", "--", url, str(destination)], f"clone {url}")
     if ref:
-        _run_or_fail(["git", "-C", str(destination), "checkout", "--quiet", ref], f"check out {ref} in {url}")
+        _run_or_fail(
+            ["git", "-C", str(destination), "checkout", "--quiet", "--end-of-options", ref],
+            f"check out {ref} in {url}",
+        )
 
 
 def repository_root(directory: Path) -> Path | None:
@@ -73,6 +80,9 @@ def _run_or_fail(command: list[str], action: str) -> None:
         raise BuildError(msg)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip().splitlines()
-        reason = detail[-1] if detail else f"git exited with status {result.returncode}"
+        if detail:
+            reason = detail[-1]
+        else:
+            reason = f"git exited with status {result.returncode}"
         msg = f"Attempted to {action}. Failed because: {reason}"
         raise BuildError(msg)

@@ -155,6 +155,24 @@ class TestLibraryVersion:
         (path.parent / "pyproject.toml").write_text('[project]\nversion = "0.4.1"\n', encoding="utf-8")
         assert library_version(read_manifest(path)) == "0.4.1"
 
+    def test_pyproject_up_to_three_folders_above(self, tmp_path: Path) -> None:
+        path = _write_manifest(tmp_path / "a" / "b" / "c" / "griptape_nodes_library.json", {"name": "L"})
+        (tmp_path / "pyproject.toml").write_text('[project]\nversion = "0.5.0"\n', encoding="utf-8")
+        assert library_version(read_manifest(path)) == "0.5.0"
+
+    def test_pyproject_four_folders_above_is_not_used(self, tmp_path: Path) -> None:
+        path = _write_manifest(tmp_path / "a" / "b" / "c" / "d" / "griptape_nodes_library.json", {"name": "L"})
+        (tmp_path / "pyproject.toml").write_text('[project]\nversion = "0.6.0"\n', encoding="utf-8")
+        assert library_version(read_manifest(path)) == "1.0.0"
+
+    def test_search_stops_at_the_repository_root(self, tmp_path: Path) -> None:
+        # A library repository inside a workspace never takes the workspace's version.
+        (tmp_path / "pyproject.toml").write_text('[project]\nversion = "9.0.0"\n', encoding="utf-8")
+        repo = tmp_path / "library-repo"
+        path = _write_manifest(repo / "nodes" / "griptape_nodes_library.json", {"name": "L"})
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)  # noqa: S603, S607
+        assert library_version(read_manifest(path)) == "1.0.0"
+
     def test_manifest_version_when_nothing_else(self, tmp_path: Path) -> None:
         assert library_version(read_manifest(self._manifest(tmp_path, "0.2.0"))) == "0.2.0"
 

@@ -16,6 +16,7 @@ engine it packages, so rez must not swap in another app version later.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import shutil
@@ -103,6 +104,14 @@ class EngineProject:
 
 
 @dataclass(frozen=True)
+class KeptPins:
+    """The gtn app and editor versions an engine package already in the store is pinned to."""
+
+    app: str | None
+    editor: str | None
+
+
+@dataclass(frozen=True)
 class EngineBuildOptions:
     # A local checkout to build instead of the published engine.
     engine_repo: Path | None
@@ -158,9 +167,14 @@ def _build_engine_project(
         raise typer.Abort
 
     options.store.mkdir(parents=True, exist_ok=True)
+    # A kept engine package keeps its app and editor pins, so this machine installs those versions,
+    # not the newest ones (which the kept package would not resolve with).
+    app_requests = [app_request]
+    if exists and not options.rebuild:
+        app_requests = kept_app_requests(options.store / ENGINE_FAMILY / project.version / PACKAGE_FILE, options)
     # The engine joins the resolve as the one being built, so the app's requirement on
     # griptape-nodes-engine is met by it and never by another release.
-    requests = [*project.dependencies, app_request, project.pip_request]
+    requests = [*project.dependencies, *app_requests, project.pip_request]
     report = install_packages(
         "the engine's dependencies and the gtn app",
         requests,
@@ -178,8 +192,69 @@ def _build_engine_project(
     try:
         validate_engine(options.tools, paths, project.version, store=options.store, editor=options.editor)
     except BuildError as exc:
-        raise rolled_back(exc, written) from exc
+        raise rolled_back(exc, written, rebuild=options.rebuild) from exc
     discard_retired(written)
+
+
+def kept_app_requests(package_file: Path, options: EngineBuildOptions) -> list[str]:
+    """The pip requests for the app (and editor) a kept engine package pins, refusing other choices."""
+    pins = read_kept_pins(package_file)
+    kept = f"{ENGINE_FAMILY}-{package_file.parent.name}"
+    if pins.app is None:
+        msg = (
+            f"Attempted to add this machine's packages to the kept {kept}. Failed because its package.py does not "
+            "name the gtn app version it was built with. Pass --rebuild to replace it."
+        )
+        raise BuildError(msg)
+    if options.app_version and options.app_version != pins.app:
+        msg = (
+            f"Attempted to build with --app-version {options.app_version}. Failed because the kept {kept} is pinned "
+            f"to gtn app {pins.app}. Pass --app-version {pins.app}, or --rebuild to replace the engine package."
+        )
+        raise BuildError(msg)
+    if options.editor and pins.editor is None:
+        msg = (
+            f"Attempted to build the engine with the editor. Failed because the kept {kept} was built without it "
+            "(--no-editor). Pass --no-editor, or --rebuild to replace the engine package."
+        )
+        raise BuildError(msg)
+    if not options.editor and pins.editor is not None:
+        msg = (
+            f"Attempted to build the engine without the editor (--no-editor). Failed because the kept {kept} "
+            "includes it. Leave out --no-editor, or pass --rebuild to replace the engine package."
+        )
+        raise BuildError(msg)
+
+    requests = [_app_request(pins.app, editor=options.editor)]
+    if pins.editor is not None:
+        requests.append(f"{EDITOR_PIP_NAME}=={pins.editor}")
+    console.print(f"  Installing gtn app {pins.app}, the version the kept {kept} is pinned to.")
+    return requests
+
+
+def read_kept_pins(package_file: Path) -> KeptPins:
+    """Read the app and editor pins from an engine ``package.py`` this tool wrote, without running it."""
+    try:
+        tree = ast.parse(package_file.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, ValueError):
+        return KeptPins(app=None, editor=None)
+    entries: list[str] = []
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+        if "requires" not in names and "platform_requires" not in names:
+            continue
+        try:
+            value = ast.literal_eval(node.value)
+        except ValueError:
+            continue
+        if isinstance(value, dict):
+            for platform_entries in value.values():
+                entries += [str(entry) for entry in platform_entries]
+        elif isinstance(value, list):
+            entries += [str(entry) for entry in value]
+    return KeptPins(app=_pinned_version(entries, APP_FAMILY), editor=_pinned_version(entries, EDITOR_FAMILY))
 
 
 def fetch_published_engine(engine_version: str | None, app_request: str, work_dir: Path) -> EngineProject:
@@ -368,6 +443,15 @@ def _app_request(app_version: str | None, *, editor: bool) -> str:
     if app_version:
         request += f"=={app_version}"
     return request
+
+
+def _pinned_version(requires: list[str], family: str) -> str | None:
+    """The version in a ``<family>-<version>`` pin among *requires*, or None when there is none."""
+    prefix = f"{family}-"
+    for entry in requires:
+        if entry.startswith(prefix):
+            return entry.removeprefix(prefix)
+    return None
 
 
 def _editor_request() -> str:

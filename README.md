@@ -117,11 +117,11 @@ Packages a node library as two packages, named after the repository or folder it
   library runs in `rez env griptape_nodes_engine==<engine> <family>==<version>`. A library with no
   execution dependencies still gets this package, so every worker request looks the same.
 
-Both use the manifest's version ranges. The version comes from `pyproject.toml` next to the
-manifest (or up to four folders above), then `git describe --tags`, then the manifest's
-`library_version`, then `1.0.0`. Declared library dependencies are cloned and built first when
-the store has no `_edit` package for them, or always with `--rebuild` (which also rebuilds their
-dependencies). Existing packages of the same version are kept unless `--rebuild`.
+Both use the manifest's version ranges. The version comes from a `pyproject.toml` in the
+manifest's folder or up to three folders above it (never above the git repository root), then
+`git describe --tags`, then the manifest's `library_version`, then `1.0.0`. Declared library
+dependencies are cloned and built first when the store has no `_edit` package for them that
+resolves on this machine, or always with `--rebuild` (which also rebuilds their dependencies). Existing packages of the same version are kept unless `--rebuild`.
 
 The check: both packages resolve from the store, and `GTN_LIBRARY_PATHS` and
 `GTN_LIBRARY_WORKER_REQUESTS` hold this library's manifest and worker request.
@@ -166,8 +166,9 @@ not given with `--tools`:
 `--print` shows the package on stdout instead of writing it (the summary and notices go to stderr). `--version` defaults to one patch above the
 newest launch package in the store; an existing version is replaced only with `--rebuild`.
 
-The check (on a platform the package is set up for): `rez env griptape_launch==<version>`
-resolves from rez's configuration, the engine and app come from the stores, the settings above
+The package needs `--tools` for the platform `write-launch` runs on, so it can be checked there;
+otherwise nothing is written (use `--print` for a package aimed only at other platforms). The
+check: `rez env griptape_launch==<version>` resolves from rez's configuration, the engine and app come from the stores, the settings above
 are set, and, from inside that environment, each library's worker is started through the prefix
 the way the engine starts it. A store rez does not search yet is added for the check with
 `REZ_PACKAGES_PATH`. When the launch package does not resolve, each library is resolved with the

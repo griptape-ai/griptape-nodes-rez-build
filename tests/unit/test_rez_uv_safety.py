@@ -19,6 +19,7 @@ from griptape_nodes_rez_build import rez_uv
 from griptape_nodes_rez_build.rez_uv import (
     TORCH_BACKEND_GUARD,
     ResolvedPackage,
+    RezPlatform,
     WheelInfo,
     _install_one,
     _write_package_py,
@@ -29,7 +30,7 @@ from griptape_nodes_rez_build.store import WrittenPackage
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-LINUX = ("linux", "x86_64")
+LINUX = RezPlatform(platform="linux", arch="x86_64")
 AWKWARD = 'It\'s "quoted" and ends with a backslash \\'
 
 
@@ -105,7 +106,6 @@ class TestValuesAreEscaped:
                 ResolvedPackage(pip_name="demo", version="1.0"),
                 uv="uv",
                 packages_dir=tmp_path,
-                extra_index_url=None,
                 extra_flags=None,
                 python_version="3.12",
             )
@@ -132,7 +132,6 @@ class TestPayloadBeforePackageFile:
                 ResolvedPackage(pip_name="demo", version="1.0"),
                 uv="uv",
                 packages_dir=tmp_path,
-                extra_index_url=None,
                 extra_flags=None,
                 python_version="3.12",
             )
@@ -148,7 +147,6 @@ class TestPayloadBeforePackageFile:
                 ResolvedPackage(pip_name="demo", version="1.0"),
                 uv="uv",
                 packages_dir=tmp_path,
-                extra_index_url=None,
                 extra_flags=None,
                 python_version="3.12",
             )
@@ -169,7 +167,6 @@ class TestPayloadBeforePackageFile:
                 ResolvedPackage(pip_name="demo", version="1.0"),
                 uv="uv",
                 packages_dir=tmp_path,
-                extra_index_url=None,
                 extra_flags=None,
                 python_version="3.12",
             )
@@ -194,7 +191,6 @@ class TestUnconvertibleRequirement:
                 ResolvedPackage(pip_name="demo", version="1.0"),
                 uv="uv",
                 packages_dir=tmp_path,
-                extra_index_url=None,
                 extra_flags=None,
                 python_version="3.12",
             )

@@ -1,0 +1,132 @@
+"""Rolling back what one build wrote into a store."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from griptape_nodes_rez_build.rez_uv import read_package_file
+from griptape_nodes_rez_build.store import WrittenPackage, copy_tree, discard_retired, move_into_place, roll_back
+
+OSX = ["platform-osx", "arch-arm64", "python-3.12"]
+WINDOWS = ["platform-windows", "arch-AMD64", "python-3.12"]
+
+
+def _package(store: Path, variants: list[list[str]]) -> Path:
+    version_dir = store / "torch" / "2.7.0"
+    for variant in variants:
+        (version_dir / Path(*variant) / "python").mkdir(parents=True)
+    (version_dir / "package.py").write_text(
+        f"name = 'torch'\n\nversion = '2.7.0'\n\nvariants = {variants!r}\n\nformat_version = 2\n", encoding="utf-8"
+    )
+    return version_dir
+
+
+class TestRollBack:
+    def test_a_version_this_build_created_is_removed(self, tmp_path: Path) -> None:
+        version_dir = _package(tmp_path, [OSX])
+        removed = roll_back([WrittenPackage(version_dir=version_dir, variant=None)])
+        assert removed == ["torch-2.7.0"]
+        assert not version_dir.exists()
+        # An empty family folder goes too; one with other versions stays.
+        assert not version_dir.parent.exists()
+
+    def test_a_variant_added_to_another_builds_version_keeps_that_build(self, tmp_path: Path) -> None:
+        version_dir = _package(tmp_path, [WINDOWS, OSX])
+
+        removed = roll_back([WrittenPackage(version_dir=version_dir, variant=OSX)])
+
+        assert removed == [f"torch-2.7.0 variant {OSX}"]
+        assert read_package_file(version_dir / "package.py").variants == [WINDOWS]
+        assert (version_dir / Path(*WINDOWS) / "python").is_dir()
+        assert not (version_dir / Path(*OSX)).exists()
+        assert "format_version = 2" in (version_dir / "package.py").read_text(encoding="utf-8")
+
+    def test_the_last_variant_takes_the_version_with_it(self, tmp_path: Path) -> None:
+        version_dir = _package(tmp_path, [OSX])
+        roll_back([WrittenPackage(version_dir=version_dir, variant=OSX)])
+        assert not version_dir.exists()
+
+    def test_already_gone_is_skipped(self, tmp_path: Path) -> None:
+        assert roll_back([WrittenPackage(version_dir=tmp_path / "nope" / "1.0", variant=None)]) == []
+
+    def test_a_replaced_version_is_put_back(self, tmp_path: Path) -> None:
+        version_dir = _package(tmp_path, [OSX])
+        staged = tmp_path / "torch" / ".staging-new"
+        staged.mkdir()
+        (staged / "package.py").write_text("name = 'torch'  # the failed rebuild\n", encoding="utf-8")
+        retired = move_into_place(staged, version_dir)
+
+        removed = roll_back([WrittenPackage(version_dir=version_dir, variant=None, retired=retired)])
+
+        assert removed == ["torch-2.7.0 (the version it replaced is back in place)"]
+        assert read_package_file(version_dir / "package.py").variants == [OSX]
+        assert retired is not None
+        assert not retired.exists()
+
+    def test_a_replaced_variant_is_put_back(self, tmp_path: Path) -> None:
+        version_dir = _package(tmp_path, [WINDOWS, OSX])
+        (version_dir / Path(*OSX) / "python" / "old.py").write_text("", encoding="utf-8")
+        before = (version_dir / "package.py").read_text(encoding="utf-8")
+        staged = tmp_path / "torch" / ".staging-new"
+        (staged / "python").mkdir(parents=True)
+        (staged / "python" / "new.py").write_text("", encoding="utf-8")
+        retired = move_into_place(staged, version_dir / Path(*OSX))
+        (version_dir / "package.py").write_text("name = 'torch'  # the failed rebuild\n", encoding="utf-8")
+
+        removed = roll_back(
+            [WrittenPackage(version_dir=version_dir, variant=OSX, previous_package_file=before, retired=retired)]
+        )
+
+        assert removed == [f"torch-2.7.0 variant {OSX} (the variant it replaced is back in place)"]
+        assert (version_dir / "package.py").read_text(encoding="utf-8") == before
+        assert (version_dir / Path(*OSX) / "python" / "old.py").is_file()
+        assert not (version_dir / Path(*OSX) / "python" / "new.py").exists()
+        assert (version_dir / Path(*WINDOWS) / "python").is_dir()
+        assert retired is not None
+        assert not retired.exists()
+
+
+class TestMoveIntoPlace:
+    def test_a_new_version_replaces_nothing(self, tmp_path: Path) -> None:
+        staged = tmp_path / ".staging"
+        staged.mkdir()
+
+        assert move_into_place(staged, tmp_path / "pkg" / "1.0") is None
+        assert (tmp_path / "pkg" / "1.0").is_dir()
+
+    def test_the_replaced_version_is_kept_aside_until_discarded(self, tmp_path: Path) -> None:
+        version_dir = _package(tmp_path, [OSX])
+        staged = tmp_path / "torch" / ".staging-new"
+        staged.mkdir()
+
+        retired = move_into_place(staged, version_dir)
+
+        assert retired is not None
+        assert retired.name.startswith(".retired-")
+        assert (retired / "package.py").is_file()
+        discard_retired([WrittenPackage(version_dir=version_dir, variant=None, retired=retired)])
+        assert not retired.exists()
+        assert version_dir.is_dir()
+
+
+class TestCopyTree:
+    def test_build_output_is_left_out_only_at_the_top(self, tmp_path: Path) -> None:
+        source = tmp_path / "library"
+        for relative in (
+            "build/lib/x.py",
+            "dist/library.whl",
+            "library.egg-info/PKG-INFO",
+            ".github/workflows/ci.yml",
+            "nodes/build/node.py",
+            "data/dist/model.json",
+            "nodes/__pycache__/node.cpython-312.pyc",
+            "nodes/.venv/bin/python",
+        ):
+            (source / relative).parent.mkdir(parents=True, exist_ok=True)
+            (source / relative).write_text("", encoding="utf-8")
+        destination = tmp_path / "payload"
+
+        copy_tree(source, destination)
+
+        copied = sorted(path.relative_to(destination).as_posix() for path in destination.rglob("*") if path.is_file())
+        assert copied == ["data/dist/model.json", "nodes/build/node.py"]

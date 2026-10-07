@@ -1,0 +1,101 @@
+[project]
+name = "griptape-nodes-rez-build"
+version = "0.1.0"
+description = "Builds Griptape Nodes, its node libraries, and a launch package as Rez packages."
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "packaging>=25.0",
+  "typer>=0.15.0",
+  "rich>=14.1.0",
+  # The uv binary every build runs, so a build does not depend on whichever uv is on PATH.
+  "uv>=0.6.16",
+]
+
+[project.scripts]
+griptape-nodes-rez = "griptape_nodes_rez_build.cli:main"
+
+[dependency-groups]
+dev = [
+  "pyright>=1.1.396",
+  "ruff>=0.16.0",
+  "typos>=1.30.2",
+]
+test = [
+  "pytest>=8.3.5",
+  "pytest-xdist>=3.6.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/griptape_nodes_rez_build"]
+
+[tool.uv]
+default-groups = ["dev", "test"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+  "TD002",   # Intentional
+  "FIX002",  # Intentional
+  "D101",    # Intentional
+  "D102",    # Intentional
+  "D107",    # Intentional
+  "ANN002",  # Intentional
+  "ANN003",  # Intentional
+  "ANN401",  # Intentional
+  "COM812",  # Intentional
+  "E501",    # Intentional: the formatter owns line length
+  "D100",    # Intentional
+  "SLF001",  # Intentional: tests reach private helpers
+  "SIM108",  # Intentional
+  "SIM110",  # Intentional
+  "D105",    # Intentional
+  "TRY400",  # Intentional
+  "FBT003",  # Intentional
+  "RET504",  # Intentional
+  "PLC0415", # Intentional
+  "CPY001",  # Intentional
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "D104"]
+# Typer builds the command line from the function signature: every option is a parameter
+# with a default, boolean flags included.
+"src/griptape_nodes_rez_build/cli.py" = ["FBT001", "FBT002", "PLR0913", "PLR0917"]
+
+[tool.ruff.lint.flake8-annotations]
+mypy-init-return = true
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.typos]
+default.extend-ignore-re = [
+  # Ignore any line that ends with this comment:
+  "(?Rm)^.*(#|//)\\s*spellchecker:disable-line$",
+  # Or: ignore the *next* line after this comment:
+  "(?m)(#|//)\\s*spellchecker:ignore-next-line\\n.*",
+]
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+include = ["."]
+exclude = [".venv", "**/__pycache__", "**/.*"]
+pythonVersion = "3.12"
+reportIncompatibleMethodOverride = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.typos.default.extend-words]
+# rez's name for the implicit packages object in package commands()
+implicits = "implicits"
+unparseable = "unparseable"

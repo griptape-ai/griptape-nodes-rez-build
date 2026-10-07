@@ -1,0 +1,72 @@
+name: Tests
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  merge_group:
+    types: [checks_requested]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-test:
+    runs-on: ${{ matrix.os }}
+    env:
+      # .python-version pins 3.12 for local work; without this, `uv run` would rebuild the
+      # environment with that version and every job would test 3.12 whatever its matrix says.
+      UV_PYTHON: ${{ matrix.python-version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.12", "3.13"]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Init environment
+        uses: ./.github/actions/init-environment
+      - name: Run unit tests
+        # Called directly rather than through make, which Windows runners cannot always spawn.
+        run: uv run pytest -n auto tests/unit
+
+  # The torch build guard against real rez, on every platform studios run it on.
+  integration-test:
+    runs-on: ${{ matrix.os }}
+    env:
+      # .python-version pins 3.12 for local work; without this, `uv run` would rebuild the
+      # environment with that version and every job would test 3.12 whatever its matrix says.
+      UV_PYTHON: ${{ matrix.python-version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.12", "3.13"]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Init environment
+        uses: ./.github/actions/init-environment
+      - name: Install rez
+        # The version the tool is tested with (README, "Requirements").
+        run: |
+          uv tool install --python ${{ matrix.python-version }} rez==3.4.0
+          # bin/ on Linux and macOS, Scripts/ on Windows: use wherever rez-env landed.
+          rez_env=$(find "$(uv tool dir)/rez" -maxdepth 2 \( -name rez-env -o -name rez-env.exe \) | head -1)
+          echo "rez-env: $rez_env"
+          echo "GRIPTAPE_NODES_REZ_TOOLS=$(dirname "$rez_env")" >> "$GITHUB_ENV"
+      - name: Run integration tests
+        # Called directly rather than through make, which Windows runners cannot always spawn.
+        run: uv run pytest tests/integration

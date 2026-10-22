@@ -6,6 +6,7 @@ import ast
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -444,7 +445,8 @@ class TestFailedCheckLeavesTheStoreAsItWas:
             (dist_info / "METADATA").write_text(
                 f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n", encoding="utf-8"
             )
-            tag = "cp312-cp312-linux_x86_64" if name == "shared" else "py3-none-any"
+            cp = f"cp{sys.version_info.major}{sys.version_info.minor}"
+            tag = f"{cp}-{cp}-linux_x86_64" if name == "shared" else "py3-none-any"
             (dist_info / "WHEEL").write_text(f"Wheel-Version: 1.0\nTag: {tag}\n", encoding="utf-8")
             (target / f"{name}.py").write_text("built = 'linux'\n", encoding="utf-8")
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")

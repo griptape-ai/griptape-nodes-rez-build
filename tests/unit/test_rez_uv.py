@@ -1307,16 +1307,28 @@ class TestInstall:
         mock_logger.warning.assert_called_with("[Rez][uv] failed packages: %s", expected_failure)
 
     @pytest.mark.usefixtures("mock_logger")
-    def test_each_package_is_installed_for_the_target_python(self, tmp_path: Path, linux_platform: None) -> None:  # noqa: ARG002
-        # Whatever interpreter uv would find on its own (an active virtualenv, PATH), the wheels
-        # must be the ones for the Python this variant is written for.
+    def test_each_package_is_installed_with_the_running_python(self, tmp_path: Path, linux_platform: None) -> None:  # noqa: ARG002
+        # Whatever interpreter uv would find on its own (an active virtualenv, PATH), wheels are
+        # chosen and sdists built by the Python this variant is written for.
+        running = f"{sys.version_info.major}.{sys.version_info.minor}"
         fake = FakeUv({"six": {}}, compile_output="six==1.16.0\n")
         with patch.object(rez_uv.subprocess, "run", side_effect=fake):
-            install(["six"], packages_dir=tmp_path, python_version="3.12", uv_cmd="uv")
+            install(["six"], packages_dir=tmp_path, python_version=running, uv_cmd="uv")
         installs = [c for c in fake.calls if "install" in c]
         assert installs
         for cmd in installs:
-            assert cmd[cmd.index("--python-version") + 1] == "3.12"
+            assert cmd[cmd.index("--python") + 1] == sys.executable
+
+    @pytest.mark.usefixtures("mock_logger")
+    def test_another_python_is_left_for_uv_to_find(self, tmp_path: Path, linux_platform: None) -> None:  # noqa: ARG002
+        other = "3.11" if sys.version_info[:2] != (3, 11) else "3.12"
+        fake = FakeUv({"six": {}}, compile_output="six==1.16.0\n")
+        with patch.object(rez_uv.subprocess, "run", side_effect=fake):
+            install(["six"], packages_dir=tmp_path, python_version=other, uv_cmd="uv")
+        installs = [c for c in fake.calls if "install" in c]
+        assert installs
+        for cmd in installs:
+            assert cmd[cmd.index("--python") + 1] == other
 
     @pytest.mark.usefixtures("mock_logger")
     def test_a_wheel_for_another_python_is_refused(self, tmp_path: Path, linux_platform: None) -> None:  # noqa: ARG002

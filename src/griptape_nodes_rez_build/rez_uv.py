@@ -1213,6 +1213,13 @@ def _read_installable_wheel(install_dir: Path, pkg: ResolvedPackage, python_vers
     return info
 
 
+def _uv_python(python_version: str) -> str:
+    """The interpreter uv installs for: this one when it is *python_version*, else any uv finds for it."""
+    if python_version == f"{sys.version_info.major}.{sys.version_info.minor}":
+        return sys.executable
+    return python_version
+
+
 def _install_one(  # noqa: PLR0913
     pkg: ResolvedPackage,
     *,
@@ -1244,10 +1251,11 @@ def _install_one(  # noqa: PLR0913
             "pip",
             "install",
             "--no-deps",
-            # Without it uv picks wheels for whichever interpreter it finds first (an active
-            # virtualenv, then PATH), which need not be the Python this variant is written for.
-            "--python-version",
-            python_version,
+            # Without it uv picks wheels for, and builds sdists with, whichever interpreter it
+            # finds first (an active virtualenv, then PATH), which need not be the Python this
+            # variant is written for. --python-version alone would only fix the wheel choice.
+            "--python",
+            _uv_python(python_version),
             "--target",
             str(tmp),
             f"{pkg.pip_name}=={requested}",

@@ -56,6 +56,7 @@ from griptape_nodes_rez_build.rez_uv import (
     torch_backend_from_local_version,
     torch_backend_request,
     wheel_requires,
+    wheel_supports_python,
 )
 from griptape_nodes_rez_build.store import roll_back
 
@@ -160,7 +161,7 @@ class FakeUv:
         if "compile" in cmd:
             return subprocess.CompletedProcess(cmd, 0, stdout=self.compile_output, stderr="")
         target = Path(cmd[cmd.index("--target") + 1])
-        spec = cmd[cmd.index("--target") + 2]
+        spec = next(arg for arg in cmd[cmd.index("--target") + 2 :] if "==" in arg)
         name, version = spec.split("==")
         if name in self.fail_install:
             return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="error: no matching distribution\n")
@@ -322,18 +323,49 @@ class TestResolveFull:
 class TestDetectWheelTag:
     def test_pure_python(self, tmp_path: Path) -> None:
         (tmp_path / "WHEEL").write_text("Wheel-Version: 1.0\nTag: py3-none-any\n", encoding="utf-8")
-        assert _detect_wheel_tag(tmp_path) == WheelTag(is_pure_python=True, platform_tag="any")
+        assert _detect_wheel_tag(tmp_path) == WheelTag(is_pure_python=True, platform_tag="any", tags=["py3-none-any"])
 
     def test_platform_wheel(self, tmp_path: Path) -> None:
         (tmp_path / "WHEEL").write_text("Tag: cp312-cp312-macosx_11_0_arm64\n", encoding="utf-8")
-        assert _detect_wheel_tag(tmp_path) == WheelTag(is_pure_python=False, platform_tag="macosx_11_0_arm64")
+        assert _detect_wheel_tag(tmp_path) == WheelTag(
+            is_pure_python=False, platform_tag="macosx_11_0_arm64", tags=["cp312-cp312-macosx_11_0_arm64"]
+        )
+
+    def test_every_tag_is_kept(self, tmp_path: Path) -> None:
+        (tmp_path / "WHEEL").write_text(
+            "Tag: cp312-cp312-manylinux_2_17_x86_64\nTag: cp312-cp312-manylinux2014_x86_64\n", encoding="utf-8"
+        )
+        assert _detect_wheel_tag(tmp_path).tags == [
+            "cp312-cp312-manylinux_2_17_x86_64",
+            "cp312-cp312-manylinux2014_x86_64",
+        ]
 
     def test_missing_wheel_file(self, tmp_path: Path) -> None:
-        assert _detect_wheel_tag(tmp_path) == WheelTag(is_pure_python=True, platform_tag="any")
+        assert _detect_wheel_tag(tmp_path) == WheelTag(is_pure_python=True, platform_tag="any", tags=[])
 
     def test_malformed_tag_defaults_to_pure(self, tmp_path: Path) -> None:
         (tmp_path / "WHEEL").write_text("Wheel-Version: 1.0\nTag: py3-none\n", encoding="utf-8")
-        assert _detect_wheel_tag(tmp_path) == WheelTag(is_pure_python=True, platform_tag="any")
+        assert _detect_wheel_tag(tmp_path) == WheelTag(is_pure_python=True, platform_tag="any", tags=[])
+
+
+class TestWheelSupportsPython:
+    @pytest.mark.parametrize(
+        ("tags", "supported"),
+        [
+            (["cp312-cp312-macosx_11_0_arm64"], True),
+            (["cp313-cp313-macosx_11_0_arm64"], False),
+            (["cp311-cp311-manylinux_2_17_x86_64"], False),
+            (["cp39-abi3-macosx_11_0_arm64"], True),
+            (["cp313-abi3-macosx_11_0_arm64"], False),
+            (["py3-none-any"], True),
+            (["py2.py3-none-any"], True),
+            (["cp311.cp312-cp311.cp312-win_amd64"], True),
+            (["cp313-cp313-win_amd64", "cp312-cp312-win_amd64"], True),
+            ([], True),
+        ],
+    )
+    def test_for_python_312(self, tags: list[str], *, supported: bool) -> None:
+        assert wheel_supports_python(tags, "3.12") is supported
 
 
 class TestReadWheelInfo:
@@ -1273,6 +1305,28 @@ class TestInstall:
         summary = mock_logger.info.call_args_list[-1].args
         assert summary[1:] == (1, 0, 0, 1, ", 1 failed")
         mock_logger.warning.assert_called_with("[Rez][uv] failed packages: %s", expected_failure)
+
+    @pytest.mark.usefixtures("mock_logger")
+    def test_each_package_is_installed_for_the_target_python(self, tmp_path: Path, linux_platform: None) -> None:  # noqa: ARG002
+        # Whatever interpreter uv would find on its own (an active virtualenv, PATH), the wheels
+        # must be the ones for the Python this variant is written for.
+        fake = FakeUv({"six": {}}, compile_output="six==1.16.0\n")
+        with patch.object(rez_uv.subprocess, "run", side_effect=fake):
+            install(["six"], packages_dir=tmp_path, python_version="3.12", uv_cmd="uv")
+        installs = [c for c in fake.calls if "install" in c]
+        assert installs
+        for cmd in installs:
+            assert cmd[cmd.index("--python-version") + 1] == "3.12"
+
+    @pytest.mark.usefixtures("mock_logger")
+    def test_a_wheel_for_another_python_is_refused(self, tmp_path: Path, linux_platform: None) -> None:  # noqa: ARG002
+        fake = FakeUv({"numpy": {"tag": "cp313-cp313-manylinux_2_17_x86_64"}}, compile_output="numpy==2.5.4\n")
+        with patch.object(rez_uv.subprocess, "run", side_effect=fake), pytest.raises(RezInstallError) as raised:
+            install(["numpy"], packages_dir=tmp_path, python_version="3.12", uv_cmd="uv")
+        assert raised.value.failures == [
+            "numpy==2.5.4 (its wheel is built for cp313-cp313-manylinux_2_17_x86_64, which Python 3.12 cannot import)"
+        ]
+        assert not (tmp_path / "numpy").exists()
 
     @pytest.mark.usefixtures("mock_logger")
     def test_rebuild_reinstalls_this_machines_variant(self, tmp_path: Path, linux_platform: None) -> None:  # noqa: ARG002

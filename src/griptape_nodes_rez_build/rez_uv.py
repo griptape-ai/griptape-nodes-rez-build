@@ -257,6 +257,8 @@ class WheelInfo:
     is_pure_python: bool
     platform_tag: str  # e.g. "macosx_11_0_arm64" or "any"
     requires_dist: list[str]  # raw Requires-Dist strings from METADATA
+    # Every "Tag:" line of the WHEEL file, as written ("cp312-cp312-macosx_11_0_arm64").
+    tags: list[str] = field(default_factory=list)
     # Console script name -> entry point target ("package.module:function").
     console_script_targets: dict[str, str] = field(default_factory=dict)
 
@@ -282,23 +284,57 @@ class WheelTag(NamedTuple):
 
     is_pure_python: bool
     platform_tag: str
+    # Every tag the WHEEL file lists ("cp312-cp312-macosx_11_0_arm64"); empty when it lists none.
+    tags: list[str]
 
 
 def _detect_wheel_tag(dist_info: Path) -> WheelTag:
-    """Read whether the wheel is pure Python, and its platform tag, from the WHEEL file."""
+    """Read whether the wheel is pure Python, its platform tag, and all its tags, from the WHEEL file."""
     wheel_file = dist_info / "WHEEL"
     if not wheel_file.exists():
-        return WheelTag(is_pure_python=True, platform_tag="any")
+        return WheelTag(is_pure_python=True, platform_tag="any", tags=[])
 
+    tags: list[str] = []
     for line in wheel_file.read_text(encoding="utf-8", errors="replace").splitlines():
         if line.lower().startswith("tag:"):
             tag = line.split(":", 1)[1].strip()
-            parts = tag.split("-")
-            if len(parts) == _WHEEL_TAG_PARTS:
-                platform_tag = parts[2]
-                return WheelTag(is_pure_python=platform_tag == "any", platform_tag=platform_tag)
+            if len(tag.split("-")) == _WHEEL_TAG_PARTS:
+                tags.append(tag)
+    if not tags:
+        return WheelTag(is_pure_python=True, platform_tag="any", tags=[])
+    platform_tag = tags[0].split("-")[2]
+    return WheelTag(is_pure_python=platform_tag == "any", platform_tag=platform_tag, tags=tags)
 
-    return WheelTag(is_pure_python=True, platform_tag="any")
+
+def wheel_supports_python(tags: list[str], python_version: str) -> bool:
+    """Whether a wheel with these WHEEL-file *tags* can be imported by CPython *python_version* ("3.12").
+
+    True when any tag is for that exact CPython ("cp312-cp312-..."), is a stable-ABI build for that
+    version or an earlier one ("cp39-abi3-..."), or is not tied to one interpreter ("py3-none-...").
+    A wheel listing no tags is taken as pure Python. Compressed tags ("cp312.cp313-...") are expanded.
+    """
+    if not tags:
+        return True
+    target = "cp" + python_version.replace(".", "")
+    target_number = int(python_version.replace(".", ""))
+    for tag in tags:
+        interpreters, abis, _platforms = tag.split("-")
+        for interpreter in interpreters.split("."):
+            for abi in abis.split("."):
+                if interpreter == target:
+                    return True
+                if abi == "abi3" and _stable_abi_minimum(interpreter) <= target_number:
+                    return True
+                if abi == "none" and interpreter.startswith("py"):
+                    return True
+    return False
+
+
+def _stable_abi_minimum(interpreter: str) -> int:
+    """The oldest CPython a stable-ABI tag supports ("cp39" -> 39), or a value no version reaches."""
+    if interpreter.startswith("cp") and interpreter[2:].isdigit():
+        return int(interpreter[2:])
+    return sys.maxsize
 
 
 def read_wheel_info(install_dir: Path, pip_name: str, version: str) -> WheelInfo:
@@ -361,6 +397,7 @@ def read_wheel_info(install_dir: Path, pip_name: str, version: str) -> WheelInfo
         platform_tag=platform_tag,
         requires_dist=requires_dist,
         console_script_targets=console_script_targets,
+        tags=wheel_tag.tags,
     )
 
 
@@ -1151,6 +1188,31 @@ def write_rez_package(  # noqa: PLR0913
     )
 
 
+def _read_installable_wheel(install_dir: Path, pkg: ResolvedPackage, python_version: str) -> WheelInfo | str:
+    """The installed wheel's metadata, or why it cannot go into this Python's variant."""
+    try:
+        info = read_wheel_info(install_dir, pkg.pip_name, pkg.version)
+    except (RuntimeError, OSError) as exc:
+        logger.warning(
+            "[Rez][uv] could not read wheel metadata for %s==%s — skipping",
+            pkg.pip_name,
+            pkg.version,
+            exc_info=logger.isEnabledFor(logging.DEBUG),
+        )
+        return f"could not read its wheel metadata: {exc}"
+    if not wheel_supports_python(info.tags, python_version):
+        # Written into the python-<version> variant anyway, it would fail to import there.
+        logger.warning(
+            "[Rez][uv] %s==%s is built for %s, not Python %s — skipping",
+            pkg.pip_name,
+            pkg.version,
+            ", ".join(info.tags),
+            python_version,
+        )
+        return f"its wheel is built for {', '.join(info.tags)}, which Python {python_version} cannot import"
+    return info
+
+
 def _install_one(  # noqa: PLR0913
     pkg: ResolvedPackage,
     *,
@@ -1182,6 +1244,10 @@ def _install_one(  # noqa: PLR0913
             "pip",
             "install",
             "--no-deps",
+            # Without it uv picks wheels for whichever interpreter it finds first (an active
+            # virtualenv, then PATH), which need not be the Python this variant is written for.
+            "--python-version",
+            python_version,
             "--target",
             str(tmp),
             f"{pkg.pip_name}=={requested}",
@@ -1205,16 +1271,9 @@ def _install_one(  # noqa: PLR0913
                 return f"download failed: {stderr_lines[-1].strip()}"
             return f"download failed (uv exited with {dl.returncode})"
 
-        try:
-            info = read_wheel_info(tmp, pkg.pip_name, pkg.version)
-        except (RuntimeError, OSError) as exc:
-            logger.warning(
-                "[Rez][uv] could not read wheel metadata for %s==%s — skipping",
-                pkg.pip_name,
-                pkg.version,
-                exc_info=logger.isEnabledFor(logging.DEBUG),
-            )
-            return f"could not read its wheel metadata: {exc}"
+        info = _read_installable_wheel(tmp, pkg, python_version)
+        if isinstance(info, str):
+            return info
 
         try:
             written_package = write_rez_package(

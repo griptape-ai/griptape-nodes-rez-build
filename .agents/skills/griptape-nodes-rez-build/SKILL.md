@@ -105,7 +105,9 @@ Python package `griptape_nodes_rez_build` (`src/`), command `griptape-nodes-rez`
 `uv tool install git+https://github.com/griptape-ai/griptape-nodes-rez-build` or run
 `uv run --python 3.12 --project <checkout> griptape-nodes-rez ...`. Needs Rez 3 tools
 (`--rez-tools PATH` on every command, or `GRIPTAPE_NODES_REZ_TOOLS`, or `rez-env` on `PATH`), the
-`platform`/`arch`/`os`/`python` bind packages for the Python it runs with, and git. Top-level
+`platform`/`arch`/`os`/`python` bind packages for the Python it runs with, and git. Every package
+is installed for that Python (`uv pip install --python-version`), and a wheel whose tags that
+CPython cannot import (`cpXY`, earlier-version `abi3`, or `py*-none`) fails the build. Top-level
 `--verbose` shows each package as it is resolved and written. It never changes Rez configuration;
 its checks use `rez env --paths <store>:<packages_path>`.
 

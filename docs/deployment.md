@@ -25,7 +25,9 @@ It needs:
   `PATH`. In a standard Rez install the folder is `<prefix>/bin/rez`.
 - **The `platform`, `arch`, `os`, and `python` packages** that `rez bind` creates, for the Python
   version the tool runs with. Packages are built for that Python, so run the tool with the Python
-  your `python` Rez package provides (`uv run --python 3.12 ...`).
+  your `python` Rez package provides (`uv run --python 3.12 ...`). Each package's wheel is chosen
+  for that Python even when another Python is active or first on `PATH`, and a wheel built for a
+  different Python stops the build rather than being written into the wrong variant.
 - **git**, for `--git-url` and for declared library dependencies.
 
 uv comes with the tool. uv settings in your environment (`UV_INDEX_URL`, `UV_FIND_LINKS`,

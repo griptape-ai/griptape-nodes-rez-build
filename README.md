@@ -33,7 +33,9 @@ GPU builds per machine, and releasing. This page is the command reference.
   the tool runs with. Every build is resolved with rez before it counts as done, so a build stops
   when they are missing.
 - Python 3.12 or 3.13. Packages are built for the Python running the tool, so run it with the
-  Python your `python` rez package provides (`uv run --python 3.12 ...`).
+  Python your `python` rez package provides (`uv run --python 3.12 ...`). Every package's wheel is
+  chosen for that Python, whatever else is on the machine (an active virtualenv, another Python on
+  `PATH`); a wheel built for a different Python stops the build, naming the package.
 - git, for `build-library --git-url` and declared library dependencies.
 
 uv comes with the tool. `UV_INDEX_URL`, `UV_FIND_LINKS`, `UV_OVERRIDE`, and other uv settings in

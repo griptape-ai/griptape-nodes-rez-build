@@ -1,15 +1,14 @@
 # Running Griptape Nodes from Rez
 
 `griptape-nodes-rez-build` builds Griptape Nodes as [Rez](https://rez.readthedocs.io) packages, so
-a studio can start it the way it starts its other tools:
+your studio can start it like its other tools:
 
 ```bash
 rez env --norc griptape_launch -- gtn
 ```
 
-Rez builds the whole environment before `gtn` starts. The engine itself knows nothing about Rez: it
-reads a few settings and environment variables that the packages set, and loads the libraries the
-environment provides.
+Rez builds the whole environment before `gtn` starts. The engine knows nothing about Rez. It reads
+settings and environment variables the packages set, and loads the libraries they provide.
 
 ## How it fits together
 
@@ -31,21 +30,32 @@ Worker:        worker.command_prefix, filled per library from GTN_LIBRARY_WORKER
 Admin:         griptape-nodes-rez build-engine | build-library | write-launch | gpu-config
 ```
 
-- **One resolve for the editor.** `rez env griptape_launch` resolves the engine and the edit-time
-  dependencies of every library in the launch package together. If two libraries need versions
-  that cannot coexist, the launch fails and Rez names the packages involved, before the editor
-  opens.
-- **One resolve per worker.** Heavy execution dependencies such as torch stay out of the editor.
-  Each library's worker starts inside its own `rez env`, with the exact engine and library versions
-  the editor loaded. The torch build comes from the machine's Rez configuration; a machine without
-  one gets a clear stop instead of a guessed build.
-- **Rez decides versions.** Packages declare version ranges and the request picks what runs, so
-  your rezconfig (package orderers, implicit packages, `rez env --time`) applies to Griptape Nodes
-  like any other tool. The engine never scans stores or picks versions.
-- **Nothing in the engine is Rez-specific.** The engine reads two settings and two environment
-  variables. Anything that can set them (Rez, conda activation scripts, a container image) can
-  provide libraries this way. The engine's *Running in a Managed Environment* guide
-  (`docs/guides/managed_environment.md` in the engine repository) describes them for any tool.
+### The editor resolves once
+
+`rez env griptape_launch` resolves the engine and the edit-time dependencies of every library in the
+launch package together. If two libraries need versions that cannot coexist, the launch fails
+before the editor opens, and Rez names the packages involved.
+
+### Each worker resolves on its own
+
+Heavy execution dependencies such as torch stay out of the editor. Each library's worker starts
+inside its own `rez env`, with the exact engine and library versions the editor loaded.
+
+The torch build comes from the machine's Rez configuration. A machine without one gets a clear stop
+instead of a guessed build.
+
+### Rez decides versions
+
+Packages declare version ranges and the request picks what runs. Your rezconfig (package orderers,
+implicit packages, `rez env --time`) applies to Griptape Nodes like any other tool. The engine never
+scans stores or picks versions.
+
+### Nothing in the engine is Rez-specific
+
+The engine reads two settings and two environment variables. Anything that can set them can provide
+libraries this way: Rez, conda activation scripts, or a container image. The engine's *Running in a
+Managed Environment* guide (`docs/guides/managed_environment.md` in the engine repository)
+describes them for any tool.
 
 ## What artists see
 
@@ -53,10 +63,10 @@ Admin:         griptape-nodes-rez build-engine | build-library | write-launch | 
   are read-only.
 - **Refresh Libraries** is greyed out, with a tooltip saying a relaunch picks up library changes.
   If your studio allows a sandbox library, the button reads **Refresh Sandbox** and reloads only the
-  sandbox (see [Allowing a sandbox library](configuration.md#allowing-a-sandbox-library)).
-- Downloading or updating a library from the editor is refused: the environment manages libraries.
-- A library listed in the project's config but not provided by the environment does not load, and
-  the library list says so.
+  sandbox. See [Allowing a sandbox library](configuration.md#allowing-a-sandbox-library).
+- Downloading or updating a library from the editor is refused. The environment manages libraries.
+- A library listed in the project's config but not provided by the environment does not load. The
+  library list says so.
 
 ## When something goes wrong
 
@@ -64,11 +74,14 @@ Admin:         griptape-nodes-rez build-engine | build-library | write-launch | 
 |:--|:--|
 | Two libraries need conflicting edit-time versions | `rez env griptape_launch` fails before the editor opens, naming the packages |
 | A required library dependency is missing | The launch resolve fails and Rez names the missing package |
-| This machine has no torch build configured | The torch package stops the worker's `rez env` with a message to run `gpu-config`; the library's worker does not start |
+| This machine has no torch build configured | The torch package stops the worker's `rez env`, saying to run `gpu-config` |
 | A newer library version is released while artists work | Nothing changes until a new environment is started |
 | The project lists a library the environment does not provide | Not loaded: listed as not provided by the environment |
-| An artist adds a sandbox node | Refused, unless the studio allowed a sandbox; then it loads, and a missing import is reported for that node |
-| Another `gtn` first on `PATH` from shell startup files | That `gtn` runs instead; start with `--norc` |
+| An artist adds a sandbox node | Refused, unless the studio allowed a sandbox |
+| Another `gtn` first on `PATH` from shell startup files | That `gtn` runs instead. Start with `--norc` |
+
+Without a torch build, the library's worker does not start. With a sandbox allowed, sandbox nodes
+load, and a missing import is reported for that node.
 
 ## The pages
 

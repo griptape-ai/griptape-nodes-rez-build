@@ -29,8 +29,8 @@ Good to know:
 - Never overwrite a released version. Build a new version instead. Avoid `rez-cp -o` for
   production.
 - `--allow-empty` is needed for the first copy into an empty release location.
-- `rez-cp --dry-run` lists what would be copied, but still creates empty family folders in the
-  destination. They are harmless.
+- Don't rely on `rez-cp --dry-run`. In Rez 3.4.0 it fails on packages without variants, such as the
+  engine and library packages. The example scripts' dry run lists packages instead.
 - One resolve covers one platform and one torch build. Run step 1 on each platform, or with each
   `.torch_backend-<build>` request, so every package a platform or build needs is copied.
 
@@ -49,7 +49,8 @@ release a launch package that pins the versions you tested.
 
 ## Example script
 
-[`examples/release_family.sh`](../examples/release_family.sh) implements the three steps. Logging,
+[`examples/release_family.sh`](../examples/release_family.sh) implements the three steps, and
+[`examples/release_family.ps1`](../examples/release_family.ps1) does the same in PowerShell. Logging,
 approvals, permissions, and notifications are yours to add.
 
 ```bash
@@ -68,6 +69,17 @@ EXTRA_REQUESTS=".torch_backend-cu118" examples/release_family.sh griptape_nodes_
 `PRODUCTION_PATHS` is the search path artists use, **without** the local store. Running the script
 again is safe: already-released versions are skipped.
 
-The script is bash, so on Windows run it from Git Bash. Rez's `--paths` separator follows the
-platform, so on Windows separate `PRODUCTION_PATHS` with `;`:
-`"P:/rez/packages/release;P:/rez/packages"`.
+On Windows, use the PowerShell script, and separate `PRODUCTION_PATHS` with `;`:
+
+```powershell
+.\examples\release_family.ps1 griptape_nodes_library_diffusers `
+    P:\griptape\rez\packages\local `
+    P:\rez\packages\release `
+    "P:\rez\packages\release;P:\rez\packages"
+
+# ...and its cu118 torch build as well:
+$env:EXTRA_REQUESTS = ".torch_backend-cu118"
+.\examples\release_family.ps1 griptape_nodes_library_diffusers ...
+```
+
+Add `-DryRun` (or `--dry-run` for the bash script) to list what would be copied without copying.

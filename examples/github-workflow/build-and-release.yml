@@ -58,14 +58,11 @@ jobs:
             rez_tools: /Volumes/pipeline/rez/bin/rez
             local_store: /Volumes/pipeline/griptape/rez/packages/local
     runs-on: ${{ matrix.runner }}
-    defaults:
-      run:
-        shell: bash
     env:
       GRIPTAPE_NODES_REZ_TOOLS: ${{ matrix.rez_tools }}
     steps:
       - name: Install the build tool
-        run: uv tool install --force --python 3.12 "$BUILD_TOOL"
+        run: uv tool install --force --python 3.12 "${{ env.BUILD_TOOL }}"
 
       - name: Build the engine
         run: >
@@ -75,9 +72,11 @@ jobs:
           --yes
 
       - name: Build the library
+        if: matrix.platform != 'windows'
+        shell: bash
         run: |
           backends=()
-          if [ "${{ matrix.platform }}" != "osx" ]; then
+          if [ "${{ matrix.platform }}" = "linux" ]; then
             for backend in ${{ inputs.torch_backends }}; do
               backends+=(--torch-backend "$backend")
             done
@@ -89,6 +88,22 @@ jobs:
             "${backends[@]}" \
             --yes
 
+      - name: Build the library (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $backends = @()
+          foreach ($backend in ("${{ inputs.torch_backends }}" -split "\s+" | Where-Object { $_ })) {
+            $backends += "--torch-backend", $backend
+          }
+          griptape-nodes-rez build-library `
+            --git-url "${{ inputs.library_git_url }}" `
+            --branch "${{ inputs.library_ref }}" `
+            --local-packages-path "${{ matrix.local_store }}" `
+            @backends `
+            --yes
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
   launch:
     name: Write the launch package
     needs: build
@@ -97,7 +112,7 @@ jobs:
       GRIPTAPE_NODES_REZ_TOOLS: /mnt/pipeline/rez/bin/rez
     steps:
       - name: Install the build tool
-        run: uv tool install --force --python 3.12 "$BUILD_TOOL"
+        run: uv tool install --force --python 3.12 "${{ env.BUILD_TOOL }}"
 
       - name: Write and check the launch package
         run: >
@@ -139,9 +154,6 @@ jobs:
             release_store: /Volumes/pipeline/rez/packages/release
             production_paths: /Volumes/pipeline/rez/packages/release:/Volumes/pipeline/rez/packages
     runs-on: ${{ matrix.runner }}
-    defaults:
-      run:
-        shell: bash
     steps:
       - uses: actions/checkout@v4
         with:
@@ -149,6 +161,8 @@ jobs:
           path: rez-build
 
       - name: Copy the tested packages to the release store
+        if: matrix.platform != 'windows'
+        shell: bash
         env:
           PATH_PREFIX: ${{ matrix.rez_tools }}
         run: |
@@ -159,7 +173,7 @@ jobs:
           }
           # 1. The library, once per torch build on Linux and Windows.
           release "${{ inputs.library_family }}"
-          if [ "${{ matrix.platform }}" != "osx" ]; then
+          if [ "${{ matrix.platform }}" = "linux" ]; then
             for backend in ${{ inputs.torch_backends }}; do
               EXTRA_REQUESTS=".torch_backend-$backend" release "${{ inputs.library_family }}"
             done
@@ -167,3 +181,23 @@ jobs:
           # 2. The engine. 3. The launch package, last.
           release griptape_nodes_engine
           release griptape_launch
+
+      - name: Copy the tested packages to the release store (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $env:PATH = "${{ matrix.rez_tools }};$env:PATH"
+          function Release([string] $Family) {
+            & rez-build/examples/release_family.ps1 $Family `
+              "${{ matrix.local_store }}" "${{ matrix.release_store }}" "${{ matrix.production_paths }}"
+          }
+          # 1. The library, once per torch build.
+          Release "${{ inputs.library_family }}"
+          foreach ($backend in ("${{ inputs.torch_backends }}" -split "\s+" | Where-Object { $_ })) {
+            $env:EXTRA_REQUESTS = ".torch_backend-$backend"
+            Release "${{ inputs.library_family }}"
+          }
+          Remove-Item Env:EXTRA_REQUESTS -ErrorAction SilentlyContinue
+          # 2. The engine. 3. The launch package, last.
+          Release griptape_nodes_engine
+          Release griptape_launch

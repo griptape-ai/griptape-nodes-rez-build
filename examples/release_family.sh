@@ -30,7 +30,9 @@ for spec in $RESOLVE; do
   name="${spec%%-*}"; version="${spec#*-}"   # family names never contain '-'; versions can
   [ -d "$LOCAL/$name/$version" ] || continue  # studio package, not ours to release
   if [ -d "$RELEASE/$name/$version" ]; then echo "already released: $spec"; continue; fi
-  rez-cp "$spec" --paths "$LOCAL" --dest-path "$RELEASE" --allow-empty --keep-timestamp $DRY_RUN
+  # rez-cp --dry-run fails on packages without variants (rez 3.4.0), so a dry run only lists them.
+  if [ -n "$DRY_RUN" ]; then echo "would copy: $spec"; continue; fi
+  rez-cp "$spec" --paths "$LOCAL" --dest-path "$RELEASE" --allow-empty --keep-timestamp
 done
 
 # 3. Validate: the family must resolve without the local store.

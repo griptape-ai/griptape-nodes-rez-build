@@ -96,3 +96,4 @@ load, and a missing import is reported for that node.
 - [Choosing environments](choosing-environments.md): the launch package, launcher profiles, and
   project configs.
 - [Releasing](releasing.md): promoting tested packages with `rez-cp`, and an example script.
+- [GitHub workflow](github-workflow.md): an untested example that builds and releases from GitHub Actions.

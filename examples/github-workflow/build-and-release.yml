@@ -44,8 +44,25 @@ env:
   TORCH_BACKENDS: ${{ inputs.torch_backends }}
 
 jobs:
+  inputs:
+    name: Check the inputs
+    runs-on: [self-hosted, Linux, rez]
+    steps:
+      - name: Reject torch builds the release can't copy
+        shell: bash
+        run: |
+          # `all` builds every torch build, but the release copies each named build, and there is
+          # no build called `all`. Name the builds instead.
+          for backend in $TORCH_BACKENDS; do
+            if [ "$backend" = "all" ]; then
+              echo "::error::torch_backends: list the builds, for example 'cpu cu128'. 'all' builds but can't be released."
+              exit 1
+            fi
+          done
+
   build:
     name: Build on ${{ matrix.platform }}
+    needs: inputs
     strategy:
       # One platform at a time, for the same reason as the concurrency group.
       max-parallel: 1

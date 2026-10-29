@@ -69,7 +69,9 @@ The `concurrency` group stops a second run from starting while one is still writ
 
 ## Torch builds
 
-Enter the torch builds in the `torch_backends` input, for example `cpu cu128`.
+Enter the torch builds in the `torch_backends` input, for example `cpu cu128`. Name each build:
+`all` works for `build-library` on its own, but the workflow rejects it, because the release copies
+each named build and there is no build called `all`.
 
 Linux and Windows build each one, and the release copies each one. macOS has a single torch build
 and skips this.

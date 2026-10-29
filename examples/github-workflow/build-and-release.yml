@@ -35,6 +35,13 @@ concurrency:
 env:
   # Pin the build tool to a commit you have tested.
   BUILD_TOOL: git+https://github.com/griptape-ai/griptape-nodes-rez-build@main
+  # Inputs reach the scripts as environment variables, never pasted into the script text, so a quote
+  # or $(...) in an input can't run as code on a runner that can write to the stores.
+  ENGINE_VERSION: ${{ inputs.engine_version }}
+  LIBRARY_GIT_URL: ${{ inputs.library_git_url }}
+  LIBRARY_REF: ${{ inputs.library_ref }}
+  LIBRARY_FAMILY: ${{ inputs.library_family }}
+  TORCH_BACKENDS: ${{ inputs.torch_backends }}
 
 jobs:
   build:
@@ -65,11 +72,23 @@ jobs:
         run: uv tool install --force --python 3.12 "${{ env.BUILD_TOOL }}"
 
       - name: Build the engine
+        if: matrix.platform != 'windows'
+        shell: bash
         run: >
           griptape-nodes-rez build-engine
-          --engine-version "${{ inputs.engine_version }}"
+          --engine-version "$ENGINE_VERSION"
           --local-packages-path "${{ matrix.local_store }}"
           --yes
+
+      - name: Build the engine (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          griptape-nodes-rez build-engine `
+            --engine-version "$env:ENGINE_VERSION" `
+            --local-packages-path "${{ matrix.local_store }}" `
+            --yes
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build the library
         if: matrix.platform != 'windows'
@@ -77,13 +96,13 @@ jobs:
         run: |
           backends=()
           if [ "${{ matrix.platform }}" = "linux" ]; then
-            for backend in ${{ inputs.torch_backends }}; do
+            for backend in $TORCH_BACKENDS; do
               backends+=(--torch-backend "$backend")
             done
           fi
           griptape-nodes-rez build-library \
-            --git-url "${{ inputs.library_git_url }}" \
-            --branch "${{ inputs.library_ref }}" \
+            --git-url "$LIBRARY_GIT_URL" \
+            --branch "$LIBRARY_REF" \
             --local-packages-path "${{ matrix.local_store }}" \
             "${backends[@]}" \
             --yes
@@ -93,12 +112,12 @@ jobs:
         shell: pwsh
         run: |
           $backends = @()
-          foreach ($backend in ("${{ inputs.torch_backends }}" -split "\s+" | Where-Object { $_ })) {
+          foreach ($backend in ($env:TORCH_BACKENDS -split "\s+" | Where-Object { $_ })) {
             $backends += "--torch-backend", $backend
           }
           griptape-nodes-rez build-library `
-            --git-url "${{ inputs.library_git_url }}" `
-            --branch "${{ inputs.library_ref }}" `
+            --git-url "$env:LIBRARY_GIT_URL" `
+            --branch "$env:LIBRARY_REF" `
             --local-packages-path "${{ matrix.local_store }}" `
             @backends `
             --yes
@@ -115,13 +134,14 @@ jobs:
         run: uv tool install --force --python 3.12 "${{ env.BUILD_TOOL }}"
 
       - name: Write and check the launch package
+        shell: bash
         run: >
           griptape-nodes-rez write-launch
           --tools linux=/mnt/pipeline/rez/bin/rez
           --tools osx=/Volumes/pipeline/rez/bin/rez
           --tools windows=P:/rez/bin/rez
-          --library "${{ inputs.library_family }}"
-          --engine-version "${{ inputs.engine_version }}"
+          --library "$LIBRARY_FAMILY"
+          --engine-version "$ENGINE_VERSION"
           --local-packages-path /mnt/pipeline/griptape/rez/packages/local
           --yes
 
@@ -172,10 +192,10 @@ jobs:
               "${{ matrix.local_store }}" "${{ matrix.release_store }}" "${{ matrix.production_paths }}"
           }
           # 1. The library, once per torch build on Linux and Windows.
-          release "${{ inputs.library_family }}"
+          release "$LIBRARY_FAMILY"
           if [ "${{ matrix.platform }}" = "linux" ]; then
-            for backend in ${{ inputs.torch_backends }}; do
-              EXTRA_REQUESTS=".torch_backend-$backend" release "${{ inputs.library_family }}"
+            for backend in $TORCH_BACKENDS; do
+              EXTRA_REQUESTS=".torch_backend-$backend" release "$LIBRARY_FAMILY"
             done
           fi
           # 2. The engine. 3. The launch package, last.
@@ -192,10 +212,10 @@ jobs:
               "${{ matrix.local_store }}" "${{ matrix.release_store }}" "${{ matrix.production_paths }}"
           }
           # 1. The library, once per torch build.
-          Release "${{ inputs.library_family }}"
-          foreach ($backend in ("${{ inputs.torch_backends }}" -split "\s+" | Where-Object { $_ })) {
+          Release $env:LIBRARY_FAMILY
+          foreach ($backend in ($env:TORCH_BACKENDS -split "\s+" | Where-Object { $_ })) {
             $env:EXTRA_REQUESTS = ".torch_backend-$backend"
-            Release "${{ inputs.library_family }}"
+            Release $env:LIBRARY_FAMILY
           }
           Remove-Item Env:EXTRA_REQUESTS -ErrorAction SilentlyContinue
           # 2. The engine. 3. The launch package, last.

@@ -1,0 +1,240 @@
+# Example GitHub Actions workflow: build Griptape Nodes into the local store, then release it with
+# rez-cp after someone approves. Untested in studio production. Adapt it before use: see
+# docs/github-workflow.md.
+#
+# Copy it to .github/workflows/ in a repository of your own. It runs on self-hosted runners that
+# can reach your Rez stores.
+
+name: Build and release Griptape Nodes
+
+on:
+  workflow_dispatch:
+    inputs:
+      engine_version:
+        description: Engine release to build, for example 0.104.2
+        required: true
+      library_git_url:
+        description: Node library repository
+        default: https://github.com/griptape-ai/griptape-nodes-library-standard.git
+      library_ref:
+        description: Library tag or branch
+        default: v0.89.0
+      library_family:
+        description: The library's Rez family
+        default: griptape_nodes_library_standard
+      torch_backends:
+        description: Torch builds for Linux and Windows, space-separated (empty for none)
+        default: ""
+
+# Only one run writes to the stores at a time. Two builds writing the same package at once can lose
+# a variant.
+concurrency:
+  group: griptape-rez-store
+  cancel-in-progress: false
+
+env:
+  # Pin the build tool to a commit you have tested.
+  BUILD_TOOL: git+https://github.com/griptape-ai/griptape-nodes-rez-build@main
+  # Inputs reach the scripts as environment variables, never pasted into the script text, so a quote
+  # or $(...) in an input can't run as code on a runner that can write to the stores.
+  ENGINE_VERSION: ${{ inputs.engine_version }}
+  LIBRARY_GIT_URL: ${{ inputs.library_git_url }}
+  LIBRARY_REF: ${{ inputs.library_ref }}
+  LIBRARY_FAMILY: ${{ inputs.library_family }}
+  TORCH_BACKENDS: ${{ inputs.torch_backends }}
+
+jobs:
+  inputs:
+    name: Check the inputs
+    runs-on: [self-hosted, Linux, rez]
+    steps:
+      - name: Reject torch builds the release can't copy
+        shell: bash
+        run: |
+          # `all` builds every torch build, but the release copies each named build, and there is
+          # no build called `all`. Name the builds instead.
+          for backend in $TORCH_BACKENDS; do
+            if [ "$backend" = "all" ]; then
+              echo "::error::torch_backends: list the builds, for example 'cpu cu128'. 'all' builds but can't be released."
+              exit 1
+            fi
+          done
+
+  build:
+    name: Build on ${{ matrix.platform }}
+    needs: inputs
+    strategy:
+      # One platform at a time, for the same reason as the concurrency group.
+      max-parallel: 1
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux
+            runner: [self-hosted, Linux, rez]
+            rez_tools: /mnt/pipeline/rez/bin/rez
+            local_store: /mnt/pipeline/griptape/rez/packages/local
+          - platform: windows
+            runner: [self-hosted, Windows, rez]
+            rez_tools: P:/rez/bin/rez
+            local_store: P:/griptape/rez/packages/local
+          - platform: osx
+            runner: [self-hosted, macOS, rez]
+            rez_tools: /Volumes/pipeline/rez/bin/rez
+            local_store: /Volumes/pipeline/griptape/rez/packages/local
+    runs-on: ${{ matrix.runner }}
+    env:
+      GRIPTAPE_NODES_REZ_TOOLS: ${{ matrix.rez_tools }}
+    steps:
+      - name: Install the build tool
+        run: uv tool install --force --python 3.12 "${{ env.BUILD_TOOL }}"
+
+      - name: Build the engine
+        if: matrix.platform != 'windows'
+        shell: bash
+        run: >
+          griptape-nodes-rez build-engine
+          --engine-version "$ENGINE_VERSION"
+          --local-packages-path "${{ matrix.local_store }}"
+          --yes
+
+      - name: Build the engine (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          griptape-nodes-rez build-engine `
+            --engine-version "$env:ENGINE_VERSION" `
+            --local-packages-path "${{ matrix.local_store }}" `
+            --yes
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build the library
+        if: matrix.platform != 'windows'
+        shell: bash
+        run: |
+          backends=()
+          if [ "${{ matrix.platform }}" = "linux" ]; then
+            for backend in $TORCH_BACKENDS; do
+              backends+=(--torch-backend "$backend")
+            done
+          fi
+          griptape-nodes-rez build-library \
+            --git-url "$LIBRARY_GIT_URL" \
+            --branch "$LIBRARY_REF" \
+            --local-packages-path "${{ matrix.local_store }}" \
+            "${backends[@]}" \
+            --yes
+
+      - name: Build the library (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $backends = @()
+          foreach ($backend in ($env:TORCH_BACKENDS -split "\s+" | Where-Object { $_ })) {
+            $backends += "--torch-backend", $backend
+          }
+          griptape-nodes-rez build-library `
+            --git-url "$env:LIBRARY_GIT_URL" `
+            --branch "$env:LIBRARY_REF" `
+            --local-packages-path "${{ matrix.local_store }}" `
+            @backends `
+            --yes
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  launch:
+    name: Write the launch package
+    needs: build
+    runs-on: [self-hosted, Linux, rez]
+    env:
+      GRIPTAPE_NODES_REZ_TOOLS: /mnt/pipeline/rez/bin/rez
+    steps:
+      - name: Install the build tool
+        run: uv tool install --force --python 3.12 "${{ env.BUILD_TOOL }}"
+
+      - name: Write and check the launch package
+        shell: bash
+        run: >
+          griptape-nodes-rez write-launch
+          --tools linux=/mnt/pipeline/rez/bin/rez
+          --tools osx=/Volumes/pipeline/rez/bin/rez
+          --tools windows=P:/rez/bin/rez
+          --library "$LIBRARY_FAMILY"
+          --engine-version "$ENGINE_VERSION"
+          --local-packages-path /mnt/pipeline/griptape/rez/packages/local
+          --yes
+
+  release:
+    name: Release on ${{ matrix.platform }}
+    needs: launch
+    # Set required reviewers on this environment, so a person approves before anything is copied.
+    environment: rez-release
+    strategy:
+      max-parallel: 1
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux
+            runner: [self-hosted, Linux, rez]
+            rez_tools: /mnt/pipeline/rez/bin/rez
+            local_store: /mnt/pipeline/griptape/rez/packages/local
+            release_store: /mnt/pipeline/rez/packages/release
+            production_paths: /mnt/pipeline/rez/packages/release:/mnt/pipeline/rez/packages
+          - platform: windows
+            runner: [self-hosted, Windows, rez]
+            rez_tools: P:/rez/bin/rez
+            local_store: P:/griptape/rez/packages/local
+            release_store: P:/rez/packages/release
+            production_paths: P:/rez/packages/release;P:/rez/packages
+          - platform: osx
+            runner: [self-hosted, macOS, rez]
+            rez_tools: /Volumes/pipeline/rez/bin/rez
+            local_store: /Volumes/pipeline/griptape/rez/packages/local
+            release_store: /Volumes/pipeline/rez/packages/release
+            production_paths: /Volumes/pipeline/rez/packages/release:/Volumes/pipeline/rez/packages
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: griptape-ai/griptape-nodes-rez-build
+          path: rez-build
+
+      - name: Copy the tested packages to the release store
+        if: matrix.platform != 'windows'
+        shell: bash
+        env:
+          PATH_PREFIX: ${{ matrix.rez_tools }}
+        run: |
+          export PATH="$PATH_PREFIX:$PATH"
+          release() {
+            rez-build/examples/release_family.sh "$1" \
+              "${{ matrix.local_store }}" "${{ matrix.release_store }}" "${{ matrix.production_paths }}"
+          }
+          # 1. The library, once per torch build on Linux and Windows.
+          release "$LIBRARY_FAMILY"
+          if [ "${{ matrix.platform }}" = "linux" ]; then
+            for backend in $TORCH_BACKENDS; do
+              EXTRA_REQUESTS=".torch_backend-$backend" release "$LIBRARY_FAMILY"
+            done
+          fi
+          # 2. The engine. 3. The launch package, last.
+          release griptape_nodes_engine
+          release griptape_launch
+
+      - name: Copy the tested packages to the release store (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $env:PATH = "${{ matrix.rez_tools }};$env:PATH"
+          function Release([string] $Family) {
+            & rez-build/examples/release_family.ps1 $Family `
+              "${{ matrix.local_store }}" "${{ matrix.release_store }}" "${{ matrix.production_paths }}"
+          }
+          # 1. The library, once per torch build.
+          Release $env:LIBRARY_FAMILY
+          foreach ($backend in ($env:TORCH_BACKENDS -split "\s+" | Where-Object { $_ })) {
+            $env:EXTRA_REQUESTS = ".torch_backend-$backend"
+            Release $env:LIBRARY_FAMILY
+          }
+          Remove-Item Env:EXTRA_REQUESTS -ErrorAction SilentlyContinue
+          # 2. The engine. 3. The launch package, last.
+          Release griptape_nodes_engine
+          Release griptape_launch
